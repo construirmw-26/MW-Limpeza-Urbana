@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: coleta-campo
+    runtime: node
+    plan: starter
+    buildCommand: npm install
+    startCommand: node server.js
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: ADMIN_USER
+        sync: false
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: ADMIN_NOME
+        sync: false
+      - key: DATA_DIR
+        value: /data
+    disk:
+      name: coleta-campo-dados
+      mountPath: /data
+      sizeGB: 1

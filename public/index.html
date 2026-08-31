@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1">
+<title>MW Limpeza Urbana — Coleta de Campo</title>
+<link rel="manifest" href="/manifest.json">
+<meta name="theme-color" content="#00632B">
+<link rel="icon" href="/img/icon-192.png">
+<link rel="apple-touch-icon" href="/img/apple-touch-icon.png">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="MW Limpeza">
+<style>
+  :root{
+    --primary:#00632B;
+    --primary-dark:#00441D;
+    --accent:#ED6D22;
+    --accent-tint:#FDEBDD;
+    --bg:#F4F6F8;
+    --card:#FFFFFF;
+    --text:#1E2430;
+    --muted:#6B7280;
+    --border:#E2E5EA;
+    --danger:#C0392B;
+    --radius:12px;
+    --logo-green:#00A87F;
+    --logo-green-dark:#007054;
+  }
+  *{box-sizing:border-box;}
+  body{margin:0;font-family:Arial,Helvetica,sans-serif;background:var(--bg);color:var(--text);padding-bottom:80px;}
+  header{background:var(--primary);color:#fff;padding:16px 18px;position:sticky;top:0;z-index:10;box-shadow:0 2px 6px rgba(0,0,0,.15);border-bottom:3px solid var(--accent);display:flex;align-items:center;gap:12px;}
+  header img{width:38px;height:38px;object-fit:contain;border-radius:6px;background:#fff;padding:3px;}
+  header h1{margin:0;font-size:18px;font-weight:700;}
+  header p{margin:2px 0 0;font-size:12px;opacity:.85;}
+  header .quem{margin-left:auto;text-align:right;font-size:12px;}
+  header .quem b{display:block;font-size:13px;}
+  header .sair{background:rgba(255,255,255,.18);border:none;color:#fff;font-size:11px;font-weight:700;padding:5px 10px;border-radius:20px;margin-top:4px;cursor:pointer;}
+  main{max-width:720px;margin:0 auto;padding:14px;}
+  .tabs{display:flex;gap:6px;margin-bottom:14px;position:sticky;top:70px;background:var(--bg);padding:8px 0;z-index:9;overflow-x:auto;}
+  .tab{flex:1;min-width:76px;text-align:center;padding:10px 6px;border-radius:10px;background:var(--card);border:1px solid var(--border);font-size:12.5px;font-weight:700;color:var(--muted);cursor:pointer;white-space:nowrap;}
+  .tab.active{background:var(--primary);color:#fff;border-color:var(--primary);}
+  .view{display:none;}
+  .view.active{display:block;}
+  .card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:16px;margin-bottom:12px;}
+  label{display:block;font-size:12.5px;font-weight:700;color:var(--muted);margin:12px 0 5px;}
+  label:first-child{margin-top:0;}
+  input[type=text],input[type=number],input[type=date],input[type=password],select,textarea{
+    width:100%;padding:11px 12px;border:1px solid var(--border);border-radius:9px;font-size:15px;font-family:inherit;background:#fff;color:var(--text);
+  }
+  textarea{resize:vertical;min-height:60px;}
+  .photo-row{display:flex;gap:10px;}
+  .photo-box{flex:1;}
+  .photo-input{border:2px dashed var(--border);border-radius:9px;padding:10px;text-align:center;position:relative;overflow:hidden;min-height:110px;display:flex;align-items:center;justify-content:center;background:#FAFBFC;}
+  .photo-input img{max-width:100%;max-height:140px;border-radius:6px;}
+  .photo-input span{font-size:12px;color:var(--muted);}
+  .photo-input input{position:absolute;inset:0;opacity:0;cursor:pointer;}
+  .btn{display:inline-block;width:100%;padding:13px;border:none;border-radius:9px;font-size:15px;font-weight:700;cursor:pointer;margin-top:16px;}
+  .btn-primary{background:var(--primary);color:#fff;}
+  .btn-primary:active{background:var(--primary-dark);}
+  .btn-secondary{background:#fff;color:var(--primary);border:1.5px solid var(--primary);}
+  .btn-outline{background:#fff;color:var(--text);border:1px solid var(--border);}
+  .btn:disabled{opacity:.6;}
+  .row2{display:flex;gap:10px;}
+  .row2 > div{flex:1;}
+  .stats{display:flex;gap:10px;margin-bottom:12px;}
+  .stat{flex:1;background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:12px;text-align:center;}
+  .stat b{display:block;font-size:20px;color:var(--primary);}
+  .stat span{font-size:11px;color:var(--muted);}
+  .entry{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:14px;margin-bottom:10px;}
+  .entry-top{display:flex;justify-content:space-between;align-items:flex-start;gap:8px;}
+  .entry-title{font-weight:700;font-size:15px;}
+  .entry-sub{font-size:12.5px;color:var(--muted);margin-top:2px;}
+  .badge{display:inline-block;background:var(--accent-tint);color:var(--accent);font-size:11px;font-weight:700;padding:3px 8px;border-radius:20px;margin-top:6px;}
+  .entry-photos{display:flex;gap:8px;margin-top:10px;}
+  .entry-photos img{width:50%;border-radius:8px;object-fit:cover;height:90px;}
+  .entry-actions{display:flex;gap:8px;margin-top:10px;}
+  .entry-actions button{flex:1;padding:8px;font-size:12.5px;border-radius:7px;border:1px solid var(--border);background:#fff;font-weight:700;}
+  .entry-actions .del{color:var(--danger);border-color:#F1D1CC;}
+  .filters{display:flex;gap:8px;margin-bottom:12px;}
+  .filters select, .filters input{flex:1;}
+  .empty{text-align:center;color:var(--muted);padding:30px 10px;font-size:14px;}
+  .note{font-size:12px;color:var(--muted);line-height:1.5;background:#FFF8E1;border:1px solid #F3E3A6;border-radius:9px;padding:10px 12px;margin-top:6px;}
+  h2{font-size:15px;margin:0 0 10px;}
+  .toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:#1E2430;color:#fff;padding:10px 18px;border-radius:20px;font-size:13px;opacity:0;transition:opacity .25s;pointer-events:none;z-index:50;}
+  .toast.show{opacity:1;}
+  .modal-overlay{position:fixed;inset:0;background:rgba(30,36,48,.55);display:flex;align-items:center;justify-content:center;z-index:100;padding:24px;}
+  .modal-box{background:#fff;border-radius:var(--radius);padding:20px;max-width:340px;width:100%;box-shadow:0 8px 30px rgba(0,0,0,.3);}
+  .modal-box p{margin:0 0 18px;font-size:14.5px;color:var(--text);line-height:1.5;}
+  .modal-actions{display:flex;gap:10px;}
+  .meta-bar-bg{background:#E2E5EA;border-radius:20px;height:14px;overflow:hidden;margin:12px 0 6px;}
+  .meta-bar-fill{height:100%;background:var(--primary);border-radius:20px;transition:width .3s;}
+  .hidden{display:none !important;}
+
+  #login-screen{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px;background:var(--logo-green);background:linear-gradient(160deg,var(--logo-green) 0%,var(--logo-green-dark) 100%);}
+  .login-box{background:transparent;border:none;box-shadow:none;padding:28px 10px;max-width:360px;width:100%;}
+  .login-box img{width:160px;height:auto;object-fit:contain;display:block;margin:0 auto 16px;filter:drop-shadow(0 8px 18px rgba(0,0,0,.28));}
+  .login-box h1{font-size:20px;text-align:center;color:#fff;margin:0 0 2px;letter-spacing:.3px;display:flex;align-items:center;justify-content:center;gap:7px;}
+  .login-box h1 .mw-mark{height:24px;width:auto;display:block;margin:0;}
+  .login-box .sub{text-align:center;color:rgba(255,255,255,.8);font-size:12.5px;margin-bottom:20px;}
+  #login-screen label{color:rgba(255,255,255,.9);}
+  #login-screen input[type=text],#login-screen input[type=password]{background:rgba(255,255,255,.14);border:1px solid rgba(255,255,255,.4);color:#fff;}
+  #login-screen input[type=text]::placeholder,#login-screen input[type=password]::placeholder{color:rgba(255,255,255,.55);}
+  #login-screen input[type=text]:focus,#login-screen input[type=password]:focus{outline:none;background:rgba(255,255,255,.22);border-color:rgba(255,255,255,.7);}
+  #login-screen .btn-primary{background:var(--accent);color:#fff;}
+  #login-screen .btn-primary:active{background:#D45A12;}
+  .login-erro{color:#FFCFC2;font-size:12.5px;margin-top:10px;text-align:center;min-height:16px;font-weight:700;}
+</style>
+</head>
+<body>
+
+<!-- TELA DE LOGIN -->
+<div id="login-screen">
+  <div class="login-box">
+    <img src="/img/logo-icon.png" alt="MW Limpeza Urbana">
+    <h1><img src="/img/mw-mark.png" alt="MW" class="mw-mark"> Limpeza Urbana</h1>
+    <div class="sub">Coleta de Campo — entre com seu usuário</div>
+    <label>Usuário</label>
+    <input type="text" id="login-usuario" autocomplete="username" autocapitalize="off">
+    <label>Senha</label>
+    <input type="password" id="login-senha" autocomplete="current-password" onkeydown="if(event.key==='Enter'){event.preventDefault();fazerLogin();}">
+    <button class="btn btn-primary" id="login-btn" onclick="fazerLogin()">Entrar</button>
+    <div class="login-erro" id="login-erro"></div>
+  </div>
+</div>
+
+<!-- APP -->
+<div id="app-root" class="hidden">
+  <header>
+    <img src="/img/logo.jpg" alt="Logo">
+    <div>
+      <h1>MW Limpeza Urbana</h1>
+      <p>Coleta de Campo · Medição + Relatório Fotográfico</p>
+    </div>
+    <div class="quem">
+      <b id="quem-nome"></b>
+      <button class="sair" onclick="fazerLogout()">Sair</button>
+    </div>
+  </header>
+
+  <main>
+    <div class="tabs">
+      <div class="tab active" data-tab="novo">+ Registro</div>
+      <div class="tab" data-tab="lista">Registros</div>
+      <div class="tab" data-tab="metas">Metas</div>
+      <div class="tab hidden" data-tab="cidades" id="tab-cidades">Cidades</div>
+      <div class="tab hidden" data-tab="servicos" id="tab-servicos">Serviços</div>
+      <div class="tab hidden" data-tab="usuarios" id="tab-usuarios">Usuários</div>
+      <div class="tab" data-tab="exportar">Exportar</div>
+    </div>
+
+    <!-- NOVO REGISTRO -->
+    <div class="view active" id="view-novo">
+      <div class="card">
+        <h2>Novo registro de serviço</h2>
+
+        <label>Cidade</label>
+        <select id="f-cidade" onchange="atualizarRuasPelaCidade()">
+          <option value="">Selecione a cidade...</option>
+        </select>
+        <div class="note hidden" id="sem-cidade-aviso">Você ainda não tem uma cidade atribuída — fale com o administrador para poder lançar registros.</div>
+        <div class="note hidden" id="nota-add-cidade" style="margin-top:6px;">Cidade não está na lista? Adicione na aba "Cidades".</div>
+
+        <label>Rua / Logradouro</label>
+        <select id="f-rua">
+          <option value="">Selecione a cidade primeiro...</option>
+        </select>
+        <div class="note hidden" id="sem-rua-aviso">Nenhuma rua cadastrada para essa cidade ainda — peça ao administrador para cadastrar na aba "Cidades".</div>
+
+        <label>Serviço Executado</label>
+        <select id="f-servico" onchange="toggleServicoFields()">
+          <option value="">Selecione...</option>
+        </select>
+        <div class="note hidden" id="sem-servico-aviso">Nenhum serviço cadastrado ainda — peça ao administrador para cadastrar na aba "Serviços".</div>
+
+        <div id="grp-medidas">
+          <div class="row2">
+            <div>
+              <label>Extensão (m)</label>
+              <input type="number" id="f-extensao" placeholder="Ex: 350" min="0" step="1">
+            </div>
+            <div id="grp-largura">
+              <label>Largura (m)</label>
+              <input type="number" id="f-largura" placeholder="Ex: 2" min="0" step="0.1">
+            </div>
+          </div>
+          <label>Lados executados</label>
+          <select id="f-lados">
+            <option value="1">1 lado</option>
+            <option value="2">2 lados</option>
+          </select>
+        </div>
+
+        <div id="grp-valor" style="display:none;">
+          <label>Valor (R$) — custo mensal fixo da cidade</label>
+          <input type="number" id="f-valor" placeholder="Ex: 1500.00" min="0" step="0.01">
+        </div>
+
+        <label>Data</label>
+        <input type="date" id="f-data">
+
+        <label>Equipe / Encarregado</label>
+        <input type="text" id="f-equipe" placeholder="Ex: Equipe 2 - João">
+
+        <label>Foto do serviço</label>
+        <div class="photo-row">
+          <div class="photo-box">
+            <div class="photo-input" id="box-antes">
+              <div class="photo-preview" id="preview-antes"><span>📷 Antes</span></div>
+              <input type="file" accept="image/*" capture="environment" id="f-antes">
+            </div>
+          </div>
+          <div class="photo-box">
+            <div class="photo-input" id="box-depois">
+              <div class="photo-preview" id="preview-depois"><span>📷 Depois</span></div>
+              <input type="file" accept="image/*" capture="environment" id="f-depois">
+            </div>
+          </div>
+        </div>
+
+        <label>Observações</label>
+        <textarea id="f-obs" placeholder="Opcional"></textarea>
+
+        <button class="btn btn-primary" id="btn-salvar" onclick="salvarRegistro()">Salvar Registro</button>
+        <div class="note">Os registros ficam salvos na nuvem — toda a equipe vê os mesmos dados. Use a aba "Exportar" no fim do mês para gerar a planilha de medição e o relatório fotográfico.</div>
+      </div>
+    </div>
+
+    <!-- LISTA -->
+    <div class="view" id="view-lista">
+      <div class="stats">
+        <div class="stat"><b id="st-total">0</b><span>registros</span></div>
+        <div class="stat"><b id="st-ext">0</b><span id="st-ext-label">m² medidos no mês</span></div>
+        <div class="stat"><b id="st-cidades">0</b><span>cidades</span></div>
+      </div>
+      <div id="st-valor-box" class="note" style="display:none;margin-bottom:12px;">Custo mensal (Equipe Padrão) no período: <b id="st-valor">R$ 0,00</b></div>
+      <div class="filters">
+        <select id="filtro-mes"></select>
+        <select id="filtro-cidade"><option value="">Todas as cidades</option></select>
+      </div>
+      <div id="lista-registros"></div>
+    </div>
+
+    <!-- METAS -->
+    <div class="view" id="view-metas">
+      <div class="card">
+        <h2>Meta semanal por serviço</h2>
+        <label>Cidade</label>
+        <select id="metas-cidade" onchange="renderMetas()"></select>
+        <div class="row2" style="margin-bottom:10px;">
+          <button class="btn btn-outline" style="margin-top:0;" onclick="mudarSemana(-1)">◀ Semana anterior</button>
+          <button class="btn btn-outline" style="margin-top:0;" onclick="mudarSemana(1)">Próxima semana ▶</button>
+        </div>
+        <label>Qualquer dia da semana desejada</label>
+        <input type="date" id="metas-data" onchange="renderMetas()">
+        <div class="note" id="metas-periodo" style="margin-top:10px;"></div>
+      </div>
+      <div id="metas-lista"></div>
+      <div class="note">Defina a meta semanal de cada serviço para a cidade escolhida acima (na unidade cadastrada para ele — m², m, ha ou R$ — pode deixar em branco os que não quer acompanhar). Cada cidade tem suas próprias metas. A barra enche sozinha de acordo com os registros lançados em "+ Registro" dentro da semana e da cidade selecionadas.</div>
+    </div>
+
+    <!-- CIDADES -->
+    <div class="view" id="view-cidades">
+      <div class="card">
+        <h2>Cidades cadastradas</h2>
+        <label>Nome da cidade</label>
+        <input type="text" id="nova-cidade" placeholder="Ex: São José do Rio">
+        <label>Contrato / Nº processo</label>
+        <input type="text" id="nova-cidade-contrato" placeholder="Ex: Contrato 012/2026">
+        <label>Responsável / encarregado fixo</label>
+        <input type="text" id="nova-cidade-responsavel" placeholder="Ex: Carlos">
+        <label>Telefone de contato</label>
+        <input type="text" id="nova-cidade-telefone" placeholder="Ex: (11) 98888-7777" onkeydown="if(event.key==='Enter'){event.preventDefault();adicionarCidade();}">
+        <button class="btn btn-primary" onclick="adicionarCidade()">+ Adicionar cidade</button>
+        <div class="note">Cadastre aqui as cidades onde a empresa atua. Elas aparecem para escolher no campo "Cidade" ao criar um novo registro em "+ Registro" — assim evita erro de digitação e nomes diferentes para a mesma cidade. Contrato, responsável e telefone são opcionais e podem ser editados depois, direto na lista abaixo.</div>
+      </div>
+      <div id="cidades-lista"></div>
+    </div>
+
+    <!-- SERVIÇOS (admin) -->
+    <div class="view" id="view-servicos">
+      <div class="card">
+        <h2>Novo serviço</h2>
+        <label>Nome do serviço</label>
+        <input type="text" id="novo-servico-nome" placeholder="Ex: Poda de Árvores" onkeydown="if(event.key==='Enter'){event.preventDefault();adicionarServico();}">
+        <label>Unidade de medida</label>
+        <select id="novo-servico-unidade">
+          <option value="m²">m² — área (extensão × largura)</option>
+          <option value="m">m — comprimento linear (só extensão)</option>
+          <option value="ha">ha — área em hectares (extensão × largura)</option>
+          <option value="R$">R$ — valor fixo mensal (como "Equipe Padrão")</option>
+        </select>
+        <button class="btn btn-primary" onclick="adicionarServico()">+ Adicionar serviço</button>
+        <div class="note">Cadastre aqui os serviços executados pela equipe. Eles aparecem para escolher no campo "Serviço Executado" ao criar um novo registro em "+ Registro", e também na aba "Metas". Escolha "m²" ou "ha" para serviços medidos por área, "m" para serviços medidos só por comprimento (sem largura, como meio-fio), ou "R$" para custos fixos mensais.</div>
+      </div>
+      <div id="servicos-lista"></div>
+    </div>
+
+    <!-- USUÁRIOS (admin) -->
+    <div class="view" id="view-usuarios">
+      <div class="card">
+        <h2>Novo usuário</h2>
+        <label>Nome</label>
+        <input type="text" id="us-nome" placeholder="Ex: Carlos Encarregado">
+        <label>Usuário (login)</label>
+        <input type="text" id="us-usuario" placeholder="Ex: carlos" autocapitalize="off">
+        <label>Senha</label>
+        <input type="text" id="us-senha" placeholder="Mínimo 4 caracteres">
+        <label>Tipo de acesso</label>
+        <select id="us-role" onchange="toggleUsCidade()">
+          <option value="encarregado">Encarregado (usa o app em campo)</option>
+          <option value="admin">Administrador (também gerencia usuários)</option>
+        </select>
+        <div id="grp-us-cidade">
+          <label>Cidade que vai atender</label>
+          <select id="us-cidade">
+            <option value="">Selecione a cidade...</option>
+          </select>
+        </div>
+        <button class="btn btn-primary" onclick="adicionarUsuario()">+ Adicionar usuário</button>
+        <div class="note">Crie um login para cada encarregado. Um encarregado só vê e lança registros da cidade escolhida acima — não vê a aba Cidades nem consegue alterar metas. O administrador continua com acesso total a tudo.</div>
+      </div>
+      <div id="usuarios-lista"></div>
+    </div>
+
+    <!-- EXPORTAR -->
+    <div class="view" id="view-exportar">
+      <div class="card">
+        <h2>Identificação (usada nos relatórios)</h2>
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;">
+          <img src="/img/logo.jpg" style="width:44px;height:44px;object-fit:contain;border-radius:6px;border:1px solid var(--border);background:#fff;padding:3px;">
+          <span style="font-size:12px;color:var(--muted);">Logomarca já aplicada no timbrado ✓</span>
+        </div>
+        <label>Nome da Construtora</label>
+        <input type="text" id="cfg-empresa" placeholder="Ex: Construtora Marcos Ltda" onchange="salvarConfig()">
+        <label>CNPJ</label>
+        <input type="text" id="cfg-cnpj" placeholder="Ex: 00.000.000/0001-00" onchange="salvarConfig()">
+        <label>Contrato / Nº Processo</label>
+        <input type="text" id="cfg-contrato" placeholder="Ex: Contrato 012/2026" onchange="salvarConfig()">
+        <div class="note">Preenchido uma vez só — fica salvo na nuvem e entra automaticamente na planilha e no relatório fotográfico, para todo mundo.</div>
+      </div>
+
+      <div class="card">
+        <h2>Exportar do mês selecionado</h2>
+        <label>Mês de referência</label>
+        <select id="exp-mes"></select>
+        <label>Cidade</label>
+        <select id="exp-cidade"><option value="">Todas as cidades</option></select>
+
+        <button class="btn btn-primary" onclick="exportarMedicao()">📄 Gerar Medição (imprimir/PDF)</button>
+        <button class="btn btn-secondary" onclick="exportarFotos()">🖼 Gerar Relatório Fotográfico (imprimir/PDF)</button>
+        <button class="btn btn-outline" onclick="exportarCSV()">⬇ Baixar Planilha (CSV)</button>
+        <div class="note">
+          Os relatórios saem do <b>mesmo registro</b> — a equipe preenche a rua, a medição e as fotos uma única vez em "+ Registro", juntando os lançamentos de todo mundo. A medição, o relatório fotográfico e a planilha são gerados automaticamente a partir disso.<br><br>
+          "Gerar Medição" abre pronta, com o mesmo timbrado, tabela completa e resumo por serviço da planilha — use "Imprimir → Salvar como PDF".<br>
+          O relatório fotográfico abre com identificação, fotos de antes/depois e campo de assinatura — use "Imprimir → Salvar como PDF".<br>
+          O CSV é útil se você quiser colar os dados na planilha Excel "Medição Mensal".
+        </div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<div class="modal-overlay hidden" id="modal-overlay">
+  <div class="modal-box">
+    <p id="modal-msg"></p>
+    <div class="modal-actions">
+      <button class="btn btn-outline" id="modal-cancel" style="margin-top:0;">Cancelar</button>
+      <button class="btn btn-primary" id="modal-confirm" style="margin-top:0;background:var(--danger);">Excluir</button>
+    </div>
+  </div>
+</div>
+
+<script src="/app.js"></script>
+</body>
+</html>
