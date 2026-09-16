@@ -58,7 +58,10 @@ function hoje(){ return new Date().toISOString().slice(0,10); }
 
 // Monta "Rua X, nº 123 - Bairro" a partir dos campos denormalizados no
 // registro (vindos da rua cadastrada no momento em que o registro foi criado).
+// Serviço "R$" (ajuda de custo mensal) não tem rua — mostra um rótulo fixo
+// em vez de deixar em branco, pra não parecer que faltou preencher algo.
 function enderecoCompleto(e){
+  if(!e.rua && entryIsValorFixo(e)) return 'Ajuda de custo mensal (sem local)';
   let s = e.rua || '';
   if(e.numero) s += ', nº ' + e.numero;
   if(e.bairro) s += ' - ' + e.bairro;
@@ -264,17 +267,25 @@ function popularSelectRua(){
   atualizarBotaoSalvar();
 }
 
+// Serviços "R$" (custo mensal fixo, tipo "Equipe Padrão") são ajuda de
+// custo lançada só pelo administrador — não aparecem pra encarregado
+// escolher, nem no "+ Registro" principal nem nas linhas extras.
+function servicosDisponiveisParaLancar(){
+  return souAdmin() ? SERVICOS : SERVICOS.filter(s=>s.unidade !== 'R$');
+}
+
 function popularSelectServico(){
   const sel = document.getElementById('f-servico');
   const aviso = document.getElementById('sem-servico-aviso');
-  if(SERVICOS.length === 0){
+  const disponiveis = servicosDisponiveisParaLancar();
+  if(disponiveis.length === 0){
     sel.innerHTML = '<option value="">Nenhum serviço cadastrado</option>';
     sel.disabled = true;
     aviso.classList.remove('hidden');
   } else {
     const atual = sel.value;
-    sel.innerHTML = '<option value="">Selecione...</option>' + SERVICOS.map(s=>`<option value="${s.nome}">${s.nome}</option>`).join('');
-    if(SERVICOS.some(s=>s.nome===atual)) sel.value = atual;
+    sel.innerHTML = '<option value="">Selecione...</option>' + disponiveis.map(s=>`<option value="${s.nome}">${s.nome}</option>`).join('');
+    if(disponiveis.some(s=>s.nome===atual)) sel.value = atual;
     sel.disabled = false;
     aviso.classList.add('hidden');
   }
@@ -285,7 +296,10 @@ function popularSelectServico(){
 function atualizarBotaoSalvar(){
   const btn = document.getElementById('btn-salvar');
   const semCidade = !document.getElementById('sem-cidade-aviso').classList.contains('hidden');
-  const semRua = !document.getElementById('sem-rua-aviso').classList.contains('hidden');
+  // Serviço "R$" (ajuda de custo mensal) não precisa de rua cadastrada —
+  // não trava o botão de salvar só por causa da rua nesse caso.
+  const isValorFixo = unidadeDoServico(document.getElementById('f-servico').value) === 'R$';
+  const semRua = !isValorFixo && !document.getElementById('sem-rua-aviso').classList.contains('hidden');
   const semServico = !document.getElementById('sem-servico-aviso').classList.contains('hidden');
   btn.disabled = semCidade || semRua || semServico;
 }
@@ -359,6 +373,16 @@ function toggleServicoFieldsGeneric(idServico, idGrpMedidas, idGrpValor, idGrpLa
 
 function toggleServicoFields(){
   toggleServicoFieldsGeneric('f-servico','grp-medidas','grp-valor','grp-largura');
+  // Serviço "R$" (custo mensal fixo, tipo "Equipe Padrão") é uma ajuda de
+  // custo da cidade — não tem local físico nem foto, então esses campos
+  // ficam escondidos (o valor continua opcional de editar, só não é
+  // obrigatório preencher rua/foto — ver salvarRegistro()).
+  const servico = document.getElementById('f-servico').value;
+  const isValorFixo = unidadeDoServico(servico) === 'R$';
+  document.getElementById('grp-rua').style.display = isValorFixo ? 'none' : '';
+  document.getElementById('grp-fotos').style.display = isValorFixo ? 'none' : '';
+  document.getElementById('btn-add-servico').classList.toggle('hidden', isValorFixo);
+  atualizarBotaoSalvar();
 }
 
 // --------------------- Vários serviços na mesma rua -----------------------
@@ -372,7 +396,7 @@ function toggleServicoFields(){
 let extrasServico = []; // sequenciais das linhas extras atualmente na tela
 
 function linhaServicoHTML(seq){
-  const opts = '<option value="">Selecione...</option>' + SERVICOS.map(s=>`<option value="${s.nome}">${s.nome}</option>`).join('');
+  const opts = '<option value="">Selecione...</option>' + servicosDisponiveisParaLancar().map(s=>`<option value="${s.nome}">${s.nome}</option>`).join('');
   return `
     <div class="card servico-extra" id="se${seq}-card" style="margin-top:10px;">
       <div style="display:flex;justify-content:space-between;align-items:center;">
@@ -525,11 +549,6 @@ async function salvarRegistro(){
   const data = document.getElementById('f-data').value;
   const obs = document.getElementById('f-obs').value.trim();
 
-  if(!cidade || !ruaId || !data){
-    alert('Preencha ao menos Cidade, Rua e Data.');
-    return;
-  }
-
   // Em modo edição só existe a linha principal (não dá pra editar vários
   // serviços de uma vez). Criando um registro novo, a linha principal + as
   // linhas extras adicionadas em "+ Outro serviço nesta mesma rua" viram,
@@ -550,6 +569,15 @@ async function salvarRegistro(){
     }
   }
 
+  // Rua é obrigatória, exceto quando todo mundo que está sendo salvo é
+  // serviço "R$" (ajuda de custo mensal, tipo "Equipe Padrão") — esse não
+  // tem local físico, só precisa entrar na Medição da cidade.
+  const todosValorFixo = linhas.every(l=>unidadeDoServico(l.servico) === 'R$');
+  if(!cidade || (!ruaId && !todosValorFixo) || !data){
+    alert('Preencha ao menos Cidade' + (todosValorFixo ? '' : ', Rua') + ' e Data.');
+    return;
+  }
+
   const btn = document.getElementById('btn-salvar');
   const editando = !!editandoId;
   btn.disabled = true;
@@ -557,16 +585,18 @@ async function salvarRegistro(){
   try{
     if(editando){
       const l = linhas[0];
+      const ruaIdLinha = unidadeDoServico(l.servico) === 'R$' ? '' : ruaId;
       await api('PUT', '/api/entries/' + encodeURIComponent(editandoId), {
-        cidade, ruaId, equipe, data, obs,
+        cidade, ruaId: ruaIdLinha, equipe, data, obs,
         servico: l.servico, extensao: l.extensao, largura: l.largura, lados: l.lados, valor: l.valor,
         fotoAntes: fotoAntesData, fotoDepois: fotoDepoisData
       });
       toast('Registro atualizado ✓');
     } else {
       for(const l of linhas){
+        const ruaIdLinha = unidadeDoServico(l.servico) === 'R$' ? '' : ruaId;
         await api('POST', '/api/entries', {
-          cidade, ruaId, equipe, data, obs,
+          cidade, ruaId: ruaIdLinha, equipe, data, obs,
           servico: l.servico, extensao: l.extensao, largura: l.largura, lados: l.lados, valor: l.valor,
           fotoAntes: fotoAntesData, fotoDepois: fotoDepoisData
         });
@@ -688,10 +718,12 @@ async function renderLista(){
         ${e.fotoAntes?`<img src="${e.fotoAntes}">`:''}
         ${e.fotoDepois?`<img src="${e.fotoDepois}">`:''}
       </div>`:''}
+      ${(souAdmin() || e.unidade !== 'R$') ? `
       <div class="entry-actions">
         <button class="edit" onclick="editarRegistro('${e.id}')">Editar</button>
         <button class="del" onclick="excluirRegistro('${e.id}')">Excluir</button>
       </div>
+      ` : ''}
     </div>
   `).join('');
 }
@@ -1454,21 +1486,21 @@ function exportarMedicao(){
   <table>
     <thead><tr>
       <th>Nº</th><th>Cidade</th><th>Rua / Logradouro</th><th>Extensão (m)</th><th>Largura (m)</th><th>Lados</th>
-      <th>Quantidade</th><th>Valor Unitário (R$)</th><th>Valor Total (R$)</th><th>Serviço Executado</th><th>Data</th><th>Equipe</th><th>Observações</th>
+      <th>Quantidade</th><th>Serviço Executado</th><th>Data</th><th>Equipe</th><th>Observações</th>
     </tr></thead>
     <tbody>`;
 
   // Linha de subtotal ao final de cada grupo de serviço (os registros já
   // vêm ordenados por serviço, então basta detectar quando o serviço muda).
-  function linhaSubtotalServico(nomeServico, subArea, subValor, subUnidades, unitarioTxt){
+  // Valores (unitário/total) não aparecem aqui — só quantidade; o valor de
+  // cada serviço sai na tabela "Resumo por Serviço" no final do relatório.
+  function linhaSubtotalServico(nomeServico, subArea, subUnidades){
     const qtdTxt = subUnidades.size === 1
       ? subArea.toLocaleString('pt-BR') + ' ' + [...subUnidades][0]
       : (subUnidades.size === 0 ? '' : '(unidades variadas)');
     return `<tr style="background:#E6F0EA;font-weight:700;">
       <td colspan="6" class="left">Total — ${nomeServico}</td>
       <td>${qtdTxt}</td>
-      <td>${unitarioTxt}</td>
-      <td>${formatMoeda(subValor)}</td>
       <td colspan="4"></td>
     </tr>`;
   }
@@ -1482,13 +1514,8 @@ function exportarMedicao(){
     const area = areaTotal(e);
     const isValorFixo = entryIsValorFixo(e);
 
-    // Valor cobrado por unidade daquele serviço (constante pro serviço todo,
-    // cadastrado na aba Serviços) — mostrado em cada linha e no subtotal.
-    const unitarioEntryTxt = isValorFixo ? 'Fixo mensal' : (area===null ? '' : formatMoeda(valorUnitarioDoServico(e.servico)) + ' / ' + (e.unidade||'m²'));
-
     if(grupoServico !== null && e.servico !== grupoServico){
-      const unitarioGrupoAnteriorTxt = grupoIsValorFixo ? 'Valor fixo mensal' : (subUnidades.size===1 ? formatMoeda(valorUnitarioDoServico(grupoServico)) + ' / ' + [...subUnidades][0] : '—');
-      html += linhaSubtotalServico(grupoServico, subArea, subValor, subUnidades, unitarioGrupoAnteriorTxt);
+      html += linhaSubtotalServico(grupoServico, subArea, subUnidades);
       resumoServicos.push({ nome: grupoServico, area: subArea, valor: subValor, unidades: subUnidades, isValorFixo: grupoIsValorFixo });
       subArea = 0; subValor = 0; subUnidades = new Set();
     }
@@ -1506,8 +1533,6 @@ function exportarMedicao(){
       <td>${isValorFixo?'':(e.largura||'')}</td>
       <td>${isValorFixo?'':(e.lados||'')}</td>
       <td>${isValorFixo?'':(area===null?'':area.toLocaleString('pt-BR') + ' ' + (e.unidade||'m²'))}</td>
-      <td>${unitarioEntryTxt}</td>
-      <td>${valorEntry ? formatMoeda(valorEntry) : ''}</td>
       <td class="left">${e.servico}</td>
       <td>${e.data.split('-').reverse().join('/')}</td>
       <td>${e.equipe||''}</td>
@@ -1515,8 +1540,7 @@ function exportarMedicao(){
     </tr>`;
   });
   if(grupoServico !== null){
-    const unitarioUltimoGrupoTxt = grupoIsValorFixo ? 'Valor fixo mensal' : (subUnidades.size===1 ? formatMoeda(valorUnitarioDoServico(grupoServico)) + ' / ' + [...subUnidades][0] : '—');
-    html += linhaSubtotalServico(grupoServico, subArea, subValor, subUnidades, unitarioUltimoGrupoTxt);
+    html += linhaSubtotalServico(grupoServico, subArea, subUnidades);
     resumoServicos.push({ nome: grupoServico, area: subArea, valor: subValor, unidades: subUnidades, isValorFixo: grupoIsValorFixo });
   }
 
@@ -1524,8 +1548,6 @@ function exportarMedicao(){
     <tfoot><tr>
       <td colspan="6" class="left">TOTAL GERAL</td>
       <td>${totalAreaTxtPrincipal}</td>
-      <td></td>
-      <td>${formatMoeda(totalValor)}</td>
       <td colspan="4"></td>
     </tr></tfoot>
   </table>
@@ -1574,9 +1596,11 @@ function exportarFotos(){
   if(!souAdmin()){ alert('Apenas o administrador tem acesso a este relatório.'); return; }
   const mes = document.getElementById('exp-mes').value;
   const cidadeFiltro = document.getElementById('exp-cidade').value;
-  const entries = ENTRIES.filter(e=>(!mes || mesKey(e.data)===mes) && (!cidadeFiltro || e.cidade===cidadeFiltro))
+  // Serviço "R$" (ajuda de custo mensal, tipo "Equipe Padrão") não tem foto
+  // nem local — não faz sentido entrar no relatório fotográfico.
+  const entries = ENTRIES.filter(e=>(!mes || mesKey(e.data)===mes) && (!cidadeFiltro || e.cidade===cidadeFiltro) && !entryIsValorFixo(e))
     .sort((a,b)=>(a.cidade||'').localeCompare(b.cidade||'') || (a.rua||'').localeCompare(b.rua||''));
-  if(entries.length===0){ alert('Nenhum registro para esse filtro.'); return; }
+  if(entries.length===0){ alert('Nenhum registro com foto para esse filtro.'); return; }
 
   const cfg = CONFIG;
   const label = mes ? mesRef(mes+'-01') : 'Todos os períodos';
