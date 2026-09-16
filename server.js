@@ -458,19 +458,29 @@ const server = http.createServer(async (req, res) => {
       // a unidade ou remove. O nome não muda depois de criado, pra não
       // desalinhar dos registros e metas já lançados (que guardam o serviço
       // pelo nome, não por id).
+      // O valor cobrado por unidade (valorUnitario) é informação sensível de
+      // preço — só o administrador pode ver, então é removido da resposta
+      // pra quem não é admin (mesmo que peçam a API direto, não só pela tela).
       if (urlPath === "/api/servicos") {
-        if (method === "GET") return sendJSON(res, 200, state.servicos);
+        if (method === "GET") {
+          const lista = user.role === "admin" ? state.servicos : state.servicos.map((s) => {
+            const { valorUnitario, ...semValor } = s;
+            return semValor;
+          });
+          return sendJSON(res, 200, lista);
+        }
         if (method === "POST") {
           if (!requireAdmin(req, res)) return;
           const body = await readJSON(req);
           const nome = String(body.nome || "").trim();
           const unidade = String(body.unidade || "").trim();
+          const valorUnitario = body.valorUnitario !== undefined && body.valorUnitario !== "" ? parseFloat(body.valorUnitario) || 0 : 0;
           if (!nome) return sendJSON(res, 400, { erro: "Informe o nome do serviço." });
           if (!unidade) return sendJSON(res, 400, { erro: "Informe a unidade de medida." });
           if (state.servicos.some((s) => s.nome.toLowerCase() === nome.toLowerCase())) {
             return sendJSON(res, 409, { erro: "Esse serviço já está cadastrado." });
           }
-          const novo = { id: crypto.randomUUID(), nome, unidade, criadoEm: new Date().toISOString() };
+          const novo = { id: crypto.randomUUID(), nome, unidade, valorUnitario, criadoEm: new Date().toISOString() };
           state.servicos.push(novo);
           persist();
           return sendJSON(res, 201, state.servicos);
@@ -487,6 +497,9 @@ const server = http.createServer(async (req, res) => {
           const unidade = String(body.unidade || "").trim();
           if (!unidade) return sendJSON(res, 400, { erro: "Informe a unidade de medida." });
           alvo.unidade = unidade;
+        }
+        if (body.valorUnitario !== undefined) {
+          alvo.valorUnitario = body.valorUnitario === "" ? 0 : parseFloat(body.valorUnitario) || 0;
         }
         persist();
         return sendJSON(res, 200, state.servicos);
