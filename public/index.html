@@ -169,11 +169,13 @@
         <div class="note hidden" id="sem-cidade-aviso">Você ainda não tem uma cidade atribuída — fale com o administrador para poder lançar registros.</div>
         <div class="note hidden" id="nota-add-cidade" style="margin-top:6px;">Cidade não está na lista? Adicione na aba "Cidades".</div>
 
-        <label>Rua / Logradouro</label>
-        <select id="f-rua">
-          <option value="">Selecione a cidade primeiro...</option>
-        </select>
-        <div class="note hidden" id="sem-rua-aviso">Nenhuma rua cadastrada para essa cidade ainda — peça ao administrador para cadastrar na aba "Cidades".</div>
+        <div id="grp-rua">
+          <label>Rua / Logradouro</label>
+          <select id="f-rua">
+            <option value="">Selecione a cidade primeiro...</option>
+          </select>
+          <div class="note hidden" id="sem-rua-aviso">Nenhuma rua cadastrada para essa cidade ainda — peça ao administrador para cadastrar na aba "Cidades".</div>
+        </div>
 
         <label>Serviço Executado</label>
         <select id="f-servico" onchange="toggleServicoFields()">
@@ -202,6 +204,7 @@
         <div id="grp-valor" style="display:none;">
           <label>Valor (R$) — custo mensal fixo da cidade</label>
           <input type="number" id="f-valor" placeholder="Ex: 1500.00" min="0" step="0.01">
+          <div class="note">Esse serviço é uma ajuda de custo mensal — não precisa de rua nem de foto, só entra com esse valor na Medição do mês.</div>
         </div>
 
         <div id="servicos-extra"></div>
@@ -214,18 +217,20 @@
         <label>Equipe / Encarregado</label>
         <input type="text" id="f-equipe" placeholder="Ex: Equipe 2 - João">
 
-        <label>Foto do serviço</label>
-        <div class="photo-row">
-          <div class="photo-box">
-            <div class="photo-input" id="box-antes">
-              <div class="photo-preview" id="preview-antes"><span>📷 Antes</span></div>
-              <input type="file" accept="image/*" id="f-antes">
+        <div id="grp-fotos">
+          <label>Foto do serviço</label>
+          <div class="photo-row">
+            <div class="photo-box">
+              <div class="photo-input" id="box-antes">
+                <div class="photo-preview" id="preview-antes"><span>📷 Antes</span></div>
+                <input type="file" accept="image/*" id="f-antes">
+              </div>
             </div>
-          </div>
-          <div class="photo-box">
-            <div class="photo-input" id="box-depois">
-              <div class="photo-preview" id="preview-depois"><span>📷 Depois</span></div>
-              <input type="file" accept="image/*" id="f-depois">
+            <div class="photo-box">
+              <div class="photo-input" id="box-depois">
+                <div class="photo-preview" id="preview-depois"><span>📷 Depois</span></div>
+                <input type="file" accept="image/*" id="f-depois">
+              </div>
             </div>
           </div>
         </div>
