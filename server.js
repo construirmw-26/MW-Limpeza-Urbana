@@ -577,27 +577,34 @@ const server = http.createServer(async (req, res) => {
             const cidadeObj = state.cidades.find((c) => c.nome === cidade);
             cidadeId = cidadeObj ? cidadeObj.id : null;
           }
+          // O serviço tem que ser um dos já cadastrados (aba Serviços) — guardamos
+          // a unidade de medida junto no registro (denormalizada), pra manter o
+          // histórico correto mesmo se o serviço mudar depois.
+          const servico = String(body.servico || "").trim();
+          const servicoObj = servico ? state.servicos.find((s) => s.nome === servico) : null;
+          // Serviço "R$" (custo mensal fixo, tipo "Equipe Padrão") é uma ajuda
+          // de custo da cidade — só o administrador lança, e não tem rua (não
+          // tem local físico, só precisa entrar na Medição do mês).
+          const isValorFixo = servicoObj && servicoObj.unidade === "R$";
+          if (isValorFixo && user.role !== "admin") {
+            return sendJSON(res, 403, { erro: "Apenas o administrador pode lançar esse serviço (custo mensal fixo)." });
+          }
           // A rua tem que ser uma das já cadastradas (pelo administrador) para
           // essa cidade — o campo é sempre um ruaId, nunca texto livre, para
           // manter a lista padronizada e evitar nomes divergentes.
           const ruaId = String(body.ruaId || "").trim();
           const ruaObj = ruaId ? state.ruas.find((r) => r.id === ruaId && r.cidadeId === cidadeId) : null;
-          // O serviço também tem que ser um dos já cadastrados (aba Serviços)
-          // — guardamos a unidade de medida junto no registro (denormalizada),
-          // pra manter o histórico correto mesmo se o serviço mudar depois.
-          const servico = String(body.servico || "").trim();
-          const servicoObj = servico ? state.servicos.find((s) => s.nome === servico) : null;
           const data = String(body.data || "").trim();
-          if (!cidade || !ruaObj || !servicoObj || !data) {
+          if (!cidade || (!ruaObj && !isValorFixo) || !servicoObj || !data) {
             return sendJSON(res, 400, { erro: "Preencha ao menos Cidade, Rua, Serviço e Data. Verifique se a rua e o serviço estão cadastrados." });
           }
           const entry = {
             id: crypto.randomUUID(),
             cidade,
-            ruaId: ruaObj.id,
-            rua: ruaObj.nome,
-            numero: ruaObj.numero || "",
-            bairro: ruaObj.bairro || "",
+            ruaId: ruaObj ? ruaObj.id : "",
+            rua: ruaObj ? ruaObj.nome : "",
+            numero: ruaObj ? ruaObj.numero || "" : "",
+            bairro: ruaObj ? ruaObj.bairro || "" : "",
             extensao: body.extensao || "",
             largura: body.largura || "",
             lados: body.lados || "",
@@ -640,23 +647,30 @@ const server = http.createServer(async (req, res) => {
           cidadeId = user.cidadeId || null;
         }
 
+        const servico = body.servico !== undefined ? String(body.servico || "").trim() : alvo.servico;
+        const servicoObj = servico ? state.servicos.find((s) => s.nome === servico) : null;
+        // Serviço "R$" (custo mensal fixo, tipo "Equipe Padrão") é uma ajuda
+        // de custo — só o administrador mexe nesses registros, e não precisa
+        // de rua (nem o próprio registro já editado, nem trocar pra um).
+        const isValorFixo = servicoObj && servicoObj.unidade === "R$";
+        if ((isValorFixo || alvo.unidade === "R$") && user.role !== "admin") {
+          return sendJSON(res, 403, { erro: "Apenas o administrador pode editar esse serviço (custo mensal fixo)." });
+        }
+
         const ruaId = body.ruaId !== undefined ? String(body.ruaId || "").trim() : alvo.ruaId;
         const ruaObj = ruaId ? state.ruas.find((r) => r.id === ruaId && r.cidadeId === cidadeId) : null;
 
-        const servico = body.servico !== undefined ? String(body.servico || "").trim() : alvo.servico;
-        const servicoObj = servico ? state.servicos.find((s) => s.nome === servico) : null;
-
         const data = body.data !== undefined ? String(body.data || "").trim() : alvo.data;
 
-        if (!cidade || !ruaObj || !servicoObj || !data) {
+        if (!cidade || (!ruaObj && !isValorFixo) || !servicoObj || !data) {
           return sendJSON(res, 400, { erro: "Preencha ao menos Cidade, Rua, Serviço e Data. Verifique se a rua e o serviço estão cadastrados." });
         }
 
         alvo.cidade = cidade;
-        alvo.ruaId = ruaObj.id;
-        alvo.rua = ruaObj.nome;
-        alvo.numero = ruaObj.numero || "";
-        alvo.bairro = ruaObj.bairro || "";
+        alvo.ruaId = ruaObj ? ruaObj.id : "";
+        alvo.rua = ruaObj ? ruaObj.nome : "";
+        alvo.numero = ruaObj ? ruaObj.numero || "" : "";
+        alvo.bairro = ruaObj ? ruaObj.bairro || "" : "";
         if (body.extensao !== undefined) alvo.extensao = body.extensao;
         if (body.largura !== undefined) alvo.largura = body.largura;
         if (body.lados !== undefined) alvo.lados = body.lados;
@@ -706,6 +720,9 @@ const server = http.createServer(async (req, res) => {
         const alvo = state.entries.find((e) => e.id === id);
         if (alvo && user.role !== "admin" && alvo.cidade !== minhaCidade) {
           return sendJSON(res, 403, { erro: "Você só pode excluir registros da sua cidade." });
+        }
+        if (alvo && alvo.unidade === "R$" && user.role !== "admin") {
+          return sendJSON(res, 403, { erro: "Apenas o administrador pode excluir esse serviço (custo mensal fixo)." });
         }
         if (alvo) {
           removerFotoSeForUpload(alvo.fotoAntes);
