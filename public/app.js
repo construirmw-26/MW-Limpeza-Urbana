@@ -1319,8 +1319,11 @@ function exportarMedicao(){
  try {
   const mes = document.getElementById('exp-mes').value;
   const cidadeFiltro = document.getElementById('exp-cidade').value;
+  // Agrupado por serviço (e dentro de cada serviço, por cidade/rua) — assim
+  // fica fácil ver e conferir o total de cada serviço, com uma linha de
+  // subtotal logo depois do último lançamento daquele serviço.
   const entries = ENTRIES.filter(e=>(!mes || mesKey(e.data)===mes) && (!cidadeFiltro || e.cidade===cidadeFiltro))
-    .sort((a,b)=>(a.cidade||'').localeCompare(b.cidade||'') || (a.rua||'').localeCompare(b.rua||''));
+    .sort((a,b)=>(a.servico||'').localeCompare(b.servico||'') || (a.cidade||'').localeCompare(b.cidade||'') || (a.rua||'').localeCompare(b.rua||''));
   if(entries.length===0){ alert('Nenhum registro para esse filtro.'); return; }
 
   const cfg = CONFIG;
@@ -1392,9 +1395,35 @@ function exportarMedicao(){
     </tr></thead>
     <tbody>`;
 
+  // Linha de subtotal ao final de cada grupo de serviço (os registros já
+  // vêm ordenados por serviço, então basta detectar quando o serviço muda).
+  function linhaSubtotalServico(nomeServico, subArea, subValor, subUnidades){
+    const qtdTxt = subUnidades.size === 1
+      ? subArea.toLocaleString('pt-BR') + ' ' + [...subUnidades][0]
+      : (subUnidades.size === 0 ? '' : '(unidades variadas)');
+    return `<tr style="background:#E6F0EA;font-weight:700;">
+      <td colspan="6" class="left">Total — ${nomeServico}</td>
+      <td>${qtdTxt}</td>
+      <td>${formatMoeda(subValor)}</td>
+      <td colspan="4"></td>
+    </tr>`;
+  }
+
+  let grupoServico = null;
+  let subArea = 0, subValor = 0;
+  let subUnidades = new Set();
   entries.forEach((e,i)=>{
     const area = areaTotal(e);
     const isValorFixo = entryIsValorFixo(e);
+
+    if(grupoServico !== null && e.servico !== grupoServico){
+      html += linhaSubtotalServico(grupoServico, subArea, subValor, subUnidades);
+      subArea = 0; subValor = 0; subUnidades = new Set();
+    }
+    grupoServico = e.servico;
+    if(!isValorFixo && area !== null){ subArea += area; subUnidades.add(e.unidade || 'm²'); }
+    subValor += parseFloat(e.valor)||0;
+
     html += `<tr>
       <td>${i+1}</td>
       <td class="left">${e.cidade}</td>
@@ -1410,6 +1439,9 @@ function exportarMedicao(){
       <td class="left">${e.obs||''}</td>
     </tr>`;
   });
+  if(grupoServico !== null){
+    html += linhaSubtotalServico(grupoServico, subArea, subValor, subUnidades);
+  }
 
   html += `</tbody>
     <tfoot><tr>
