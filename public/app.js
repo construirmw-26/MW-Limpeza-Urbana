@@ -343,6 +343,18 @@ function toggleServicoFieldsGeneric(idServico, idGrpMedidas, idGrpValor, idGrpLa
   document.getElementById(idGrpMedidas).style.display = isValorFixo ? 'none' : '';
   document.getElementById(idGrpValor).style.display = isValorFixo ? '' : 'none';
   document.getElementById(idGrpLargura).style.display = isLinear ? 'none' : '';
+  // Serviços "R$" têm um valor mensal padrão cadastrado na aba Serviços —
+  // pré-preenche o campo Valor ao escolher o serviço (só quando ainda está
+  // vazio, pra não sobrescrever o que a pessoa já digitou; num registro em
+  // edição, editarRegistro() preenche o valor real logo depois desta chamada,
+  // então o padrão aqui não atrapalha).
+  if(isValorFixo){
+    const valorInput = document.getElementById(idServico.replace('-servico','-valor'));
+    if(valorInput && !valorInput.value){
+      const padrao = valorUnitarioDoServico(servico);
+      if(padrao) valorInput.value = padrao;
+    }
+  }
 }
 
 function toggleServicoFields(){
@@ -1085,11 +1097,12 @@ function removerServicoSelecionado(){
   removerServico(s.id, s.nome);
 }
 
-// Esconde o campo "Valor por unidade" ao cadastrar um serviço "R$" (custo
-// fixo mensal), já que nesse caso o valor é digitado direto em cada registro.
+// Pra serviço "R$" (custo fixo mensal) o campo de valor vira um "padrão":
+// só pré-preenche o Valor ao lançar um registro novo desse serviço, mas
+// ainda dá pra mudar em cada lançamento — por isso o rótulo muda.
 function toggleNovoServicoValorUnitario(){
   const isFixo = document.getElementById('novo-servico-unidade').value === 'R$';
-  document.getElementById('grp-novo-servico-valor').style.display = isFixo ? 'none' : '';
+  document.getElementById('label-novo-servico-valor').textContent = isFixo ? 'Valor mensal padrão (R$)' : 'Valor cobrado por unidade (R$)';
 }
 
 async function adicionarServico(){
@@ -1175,12 +1188,12 @@ async function renderServicos(){
         <option value="ha" ${s.unidade==='ha'?'selected':''}>ha — área em hectares (extensão × largura)</option>
         <option value="R$" ${s.unidade==='R$'?'selected':''}>R$ — valor fixo mensal</option>
       </select>
-      ${s.unidade !== 'R$' ? `
-      <label style="margin-top:10px;">Valor cobrado por ${s.unidade} (R$)</label>
+      <label style="margin-top:10px;">${s.unidade === 'R$' ? 'Valor mensal padrão (R$)' : `Valor cobrado por ${s.unidade} (R$)`}</label>
       <input type="number" step="0.01" min="0" id="edit-servico-valor-${s.id}" value="${s.valorUnitario || ''}" placeholder="Ex: 2.50">
       <button class="btn btn-outline" style="margin-top:6px;" onclick="atualizarServicoValorUnitario('${s.id}', document.getElementById('edit-servico-valor-${s.id}').value)">Salvar valor</button>
-      <div class="note" style="margin-top:6px;">Esse valor é usado para calcular o valor final desse serviço no relatório de Medição (quantidade medida × valor por ${s.unidade}).</div>
-      ` : ''}
+      <div class="note" style="margin-top:6px;">${s.unidade === 'R$'
+        ? 'Esse valor só serve de padrão: ao lançar um registro novo desse serviço, o campo Valor já vem preenchido com ele, mas ainda dá pra mudar naquele lançamento específico.'
+        : `Esse valor é usado para calcular o valor final desse serviço no relatório de Medição (quantidade medida × valor por ${s.unidade}).`}</div>
       <div class="note" style="margin-top:8px;">O nome do serviço não pode ser alterado depois de cadastrado, para não desalinhar dos registros e metas já lançados. Para corrigir o nome, cadastre um novo serviço e remova este.</div>
     </div>
   `;
@@ -1441,19 +1454,20 @@ function exportarMedicao(){
   <table>
     <thead><tr>
       <th>Nº</th><th>Cidade</th><th>Rua / Logradouro</th><th>Extensão (m)</th><th>Largura (m)</th><th>Lados</th>
-      <th>Quantidade</th><th>Valor (R$)</th><th>Serviço Executado</th><th>Data</th><th>Equipe</th><th>Observações</th>
+      <th>Quantidade</th><th>Valor Unitário (R$)</th><th>Valor Total (R$)</th><th>Serviço Executado</th><th>Data</th><th>Equipe</th><th>Observações</th>
     </tr></thead>
     <tbody>`;
 
   // Linha de subtotal ao final de cada grupo de serviço (os registros já
   // vêm ordenados por serviço, então basta detectar quando o serviço muda).
-  function linhaSubtotalServico(nomeServico, subArea, subValor, subUnidades){
+  function linhaSubtotalServico(nomeServico, subArea, subValor, subUnidades, unitarioTxt){
     const qtdTxt = subUnidades.size === 1
       ? subArea.toLocaleString('pt-BR') + ' ' + [...subUnidades][0]
       : (subUnidades.size === 0 ? '' : '(unidades variadas)');
     return `<tr style="background:#E6F0EA;font-weight:700;">
       <td colspan="6" class="left">Total — ${nomeServico}</td>
       <td>${qtdTxt}</td>
+      <td>${unitarioTxt}</td>
       <td>${formatMoeda(subValor)}</td>
       <td colspan="4"></td>
     </tr>`;
@@ -1468,8 +1482,13 @@ function exportarMedicao(){
     const area = areaTotal(e);
     const isValorFixo = entryIsValorFixo(e);
 
+    // Valor cobrado por unidade daquele serviço (constante pro serviço todo,
+    // cadastrado na aba Serviços) — mostrado em cada linha e no subtotal.
+    const unitarioEntryTxt = isValorFixo ? 'Fixo mensal' : (area===null ? '' : formatMoeda(valorUnitarioDoServico(e.servico)) + ' / ' + (e.unidade||'m²'));
+
     if(grupoServico !== null && e.servico !== grupoServico){
-      html += linhaSubtotalServico(grupoServico, subArea, subValor, subUnidades);
+      const unitarioGrupoAnteriorTxt = grupoIsValorFixo ? 'Valor fixo mensal' : (subUnidades.size===1 ? formatMoeda(valorUnitarioDoServico(grupoServico)) + ' / ' + [...subUnidades][0] : '—');
+      html += linhaSubtotalServico(grupoServico, subArea, subValor, subUnidades, unitarioGrupoAnteriorTxt);
       resumoServicos.push({ nome: grupoServico, area: subArea, valor: subValor, unidades: subUnidades, isValorFixo: grupoIsValorFixo });
       subArea = 0; subValor = 0; subUnidades = new Set();
     }
@@ -1487,6 +1506,7 @@ function exportarMedicao(){
       <td>${isValorFixo?'':(e.largura||'')}</td>
       <td>${isValorFixo?'':(e.lados||'')}</td>
       <td>${isValorFixo?'':(area===null?'':area.toLocaleString('pt-BR') + ' ' + (e.unidade||'m²'))}</td>
+      <td>${unitarioEntryTxt}</td>
       <td>${valorEntry ? formatMoeda(valorEntry) : ''}</td>
       <td class="left">${e.servico}</td>
       <td>${e.data.split('-').reverse().join('/')}</td>
@@ -1495,7 +1515,8 @@ function exportarMedicao(){
     </tr>`;
   });
   if(grupoServico !== null){
-    html += linhaSubtotalServico(grupoServico, subArea, subValor, subUnidades);
+    const unitarioUltimoGrupoTxt = grupoIsValorFixo ? 'Valor fixo mensal' : (subUnidades.size===1 ? formatMoeda(valorUnitarioDoServico(grupoServico)) + ' / ' + [...subUnidades][0] : '—');
+    html += linhaSubtotalServico(grupoServico, subArea, subValor, subUnidades, unitarioUltimoGrupoTxt);
     resumoServicos.push({ nome: grupoServico, area: subArea, valor: subValor, unidades: subUnidades, isValorFixo: grupoIsValorFixo });
   }
 
@@ -1503,6 +1524,7 @@ function exportarMedicao(){
     <tfoot><tr>
       <td colspan="6" class="left">TOTAL GERAL</td>
       <td>${totalAreaTxtPrincipal}</td>
+      <td></td>
       <td>${formatMoeda(totalValor)}</td>
       <td colspan="4"></td>
     </tr></tfoot>
