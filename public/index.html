@@ -78,6 +78,9 @@
   .entry-actions{display:flex;gap:8px;margin-top:10px;}
   .entry-actions button{flex:1;padding:8px;font-size:12.5px;border-radius:7px;border:1px solid var(--border);background:#fff;font-weight:700;}
   .entry-actions .del{color:var(--danger);border-color:#F1D1CC;}
+  .entry-actions .edit{color:var(--primary);border-color:#BFE0CD;}
+  .edit-banner{display:flex;align-items:center;justify-content:space-between;gap:10px;background:var(--accent-tint);border:1px solid #F3CBA6;color:var(--accent);border-radius:9px;padding:10px 12px;margin-bottom:12px;font-size:13px;font-weight:700;}
+  .edit-banner button{background:none;border:1px solid var(--accent);color:var(--accent);border-radius:7px;padding:5px 10px;font-size:12px;font-weight:700;cursor:pointer;}
   .filters{display:flex;gap:8px;margin-bottom:12px;}
   .filters select, .filters input{flex:1;}
   .empty{text-align:center;color:var(--muted);padding:30px 10px;font-size:14px;}
@@ -152,6 +155,10 @@
 
     <!-- NOVO REGISTRO -->
     <div class="view active" id="view-novo">
+      <div class="edit-banner hidden" id="aviso-editando">
+        <span>✏️ Editando um registro já lançado</span>
+        <button onclick="cancelarEdicao()">Cancelar</button>
+      </div>
       <div class="card">
         <h2>Novo registro de serviço</h2>
 
@@ -196,6 +203,10 @@
           <label>Valor (R$) — custo mensal fixo da cidade</label>
           <input type="number" id="f-valor" placeholder="Ex: 1500.00" min="0" step="0.01">
         </div>
+
+        <div id="servicos-extra"></div>
+        <button type="button" class="btn btn-outline" id="btn-add-servico" onclick="adicionarLinhaServico()">+ Outro serviço nesta mesma rua</button>
+        <div class="note">Use isso quando, na mesma rua e com as mesmas fotos, a equipe executou mais de um serviço (ex: capina e roçada juntas) — cada serviço vira um registro separado na lista e nos relatórios.</div>
 
         <label>Data</label>
         <input type="date" id="f-data">
