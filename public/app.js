@@ -11,6 +11,7 @@ let SERVICOS = []; // serviços cadastrados (aba Serviços) — {id, nome, unida
 let METAS = {};
 let CONFIG = {};
 let fotoAntesData = null, fotoDepoisData = null;
+let editandoId = null; // id do registro sendo editado, ou null quando é um lançamento novo
 
 // Unidade de medida de um serviço pelo nome (usada em "+ Registro" e nas
 // Metas). "R$" é tratado como custo fixo mensal (mostra só o campo Valor);
@@ -320,14 +321,101 @@ function setupPhotoInput(inputId, previewId, setter){
 // de valor fixo, não medida por extensão/largura/lados — o formulário troca
 // um grupo de campos pelo outro. Serviços em "m" (comprimento linear, como
 // meio-fio) não usam largura — só extensão × lados.
-function toggleServicoFields(){
-  const servico = document.getElementById('f-servico').value;
+// Versão genérica de toggleServicoFields, reaproveitada tanto no serviço
+// principal ("f-...") quanto em cada linha extra de "+ Outro serviço nesta
+// mesma rua" (prefixo "se<seq>-...").
+function toggleServicoFieldsGeneric(idServico, idGrpMedidas, idGrpValor, idGrpLargura){
+  const servico = document.getElementById(idServico).value;
   const unidade = unidadeDoServico(servico);
   const isValorFixo = unidade === 'R$';
   const isLinear = unidade === 'm';
-  document.getElementById('grp-medidas').style.display = isValorFixo ? 'none' : '';
-  document.getElementById('grp-valor').style.display = isValorFixo ? '' : 'none';
-  document.getElementById('grp-largura').style.display = isLinear ? 'none' : '';
+  document.getElementById(idGrpMedidas).style.display = isValorFixo ? 'none' : '';
+  document.getElementById(idGrpValor).style.display = isValorFixo ? '' : 'none';
+  document.getElementById(idGrpLargura).style.display = isLinear ? 'none' : '';
+}
+
+function toggleServicoFields(){
+  toggleServicoFieldsGeneric('f-servico','grp-medidas','grp-valor','grp-largura');
+}
+
+// --------------------- Vários serviços na mesma rua -----------------------
+// Às vezes a equipe executa mais de um serviço na mesma rua e tira a mesma
+// foto de antes/depois pros dois (ex: capina + roçada). Em vez de obrigar a
+// pessoa a preencher rua/data/fotos de novo pra cada serviço, deixamos
+// adicionar "linhas" extras de serviço no mesmo formulário — ao salvar, cada
+// linha vira um registro separado (mesma rua/data/equipe/obs/fotos), sem
+// mudar como os registros já existentes funcionam (relatórios, metas etc.
+// continuam vendo um serviço por registro, igual sempre foi).
+let extrasServico = []; // sequenciais das linhas extras atualmente na tela
+
+function linhaServicoHTML(seq){
+  const opts = '<option value="">Selecione...</option>' + SERVICOS.map(s=>`<option value="${s.nome}">${s.nome}</option>`).join('');
+  return `
+    <div class="card servico-extra" id="se${seq}-card" style="margin-top:10px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;">
+        <h2 style="margin:0;">Outro serviço nesta mesma rua</h2>
+        <button type="button" class="btn btn-outline" style="width:auto;margin:0;padding:6px 12px;font-size:12.5px;" onclick="removerLinhaServico(${seq})">Remover</button>
+      </div>
+      <label>Serviço Executado</label>
+      <select id="se${seq}-servico" onchange="toggleServicoFieldsGeneric('se${seq}-servico','se${seq}-grp-medidas','se${seq}-grp-valor','se${seq}-grp-largura')">${opts}</select>
+      <div id="se${seq}-grp-medidas">
+        <div class="row2">
+          <div>
+            <label>Extensão (m)</label>
+            <input type="number" id="se${seq}-extensao" placeholder="Ex: 350" min="0" step="1">
+          </div>
+          <div id="se${seq}-grp-largura">
+            <label>Largura (m)</label>
+            <input type="number" id="se${seq}-largura" placeholder="Ex: 2" min="0" step="0.1">
+          </div>
+        </div>
+        <label>Lados executados</label>
+        <select id="se${seq}-lados">
+          <option value="1">1 lado</option>
+          <option value="2">2 lados</option>
+        </select>
+      </div>
+      <div id="se${seq}-grp-valor" style="display:none;">
+        <label>Valor (R$) — custo mensal fixo da cidade</label>
+        <input type="number" id="se${seq}-valor" placeholder="Ex: 1500.00" min="0" step="0.01">
+      </div>
+    </div>`;
+}
+
+let proximoSeqServico = 1;
+function adicionarLinhaServico(){
+  const seq = proximoSeqServico++;
+  extrasServico.push(seq);
+  document.getElementById('servicos-extra').insertAdjacentHTML('beforeend', linhaServicoHTML(seq));
+}
+
+function removerLinhaServico(seq){
+  extrasServico = extrasServico.filter(s=>s!==seq);
+  const el = document.getElementById('se'+seq+'-card');
+  if(el) el.remove();
+}
+
+function limparLinhasServico(){
+  document.getElementById('servicos-extra').innerHTML = '';
+  extrasServico = [];
+}
+
+// Lê os valores de uma "linha" de serviço (a principal, prefixo "f", ou uma
+// extra, prefixo "se<seq>") já considerando a unidade do serviço escolhido
+// (esconde extensão/largura/lados quando é valor fixo, esconde largura
+// quando é medida só em comprimento).
+function lerLinhaServico(prefix){
+  const servico = document.getElementById(prefix+'-servico').value;
+  const unidade = unidadeDoServico(servico);
+  const isValorFixo = unidade === 'R$';
+  const isLinear = unidade === 'm';
+  return {
+    servico,
+    extensao: isValorFixo ? '' : document.getElementById(prefix+'-extensao').value,
+    largura: (isValorFixo || isLinear) ? '' : document.getElementById(prefix+'-largura').value,
+    lados: isValorFixo ? '' : (document.getElementById(prefix+'-lados').value || '1'),
+    valor: isValorFixo ? document.getElementById(prefix+'-valor').value : '',
+  };
 }
 
 function resetForm(){
@@ -343,45 +431,131 @@ function resetForm(){
   document.getElementById('f-depois').value = '';
   toggleServicoFields();
   popularSelectCidade(); // repõe a cidade (fixa p/ encarregado) e já recarrega as ruas dela
+  limparLinhasServico();
+  sairDoModoEdicao();
+}
+
+// ---------------------------- Editar registro -----------------------------
+// Ativa o "modo edição": abre a aba "+ Registro" já preenchida com os dados
+// do registro escolhido na lista. Salvar Registro passa a enviar PUT em vez
+// de POST; Cancelar (ou salvar com sucesso) volta ao modo de lançar novo.
+async function editarRegistro(id){
+  const e = ENTRIES.find(x=>x.id===id);
+  if(!e) return;
+  editandoId = id;
+
+  // Ativa a aba "+ Registro" (sem passar pelo listener genérico das abas).
+  document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
+  document.querySelectorAll('.view').forEach(v=>v.classList.remove('active'));
+  document.querySelector('.tab[data-tab="novo"]').classList.add('active');
+  document.getElementById('view-novo').classList.add('active');
+
+  if(souAdmin()) document.getElementById('f-cidade').value = e.cidade;
+  await atualizarRuasPelaCidade(); // recarrega as ruas da cidade certa antes de escolher a rua
+  document.getElementById('f-rua').value = e.ruaId || '';
+
+  document.getElementById('f-servico').value = e.servico || '';
+  toggleServicoFields();
+
+  document.getElementById('f-extensao').value = e.extensao || '';
+  document.getElementById('f-largura').value = e.largura || '';
+  document.getElementById('f-lados').value = e.lados || '1';
+  document.getElementById('f-valor').value = e.valor || '';
+  document.getElementById('f-equipe').value = e.equipe || '';
+  document.getElementById('f-data').value = e.data || hoje();
+  document.getElementById('f-obs').value = e.obs || '';
+
+  fotoAntesData = e.fotoAntes || null;
+  fotoDepoisData = e.fotoDepois || null;
+  document.getElementById('preview-antes').innerHTML = fotoAntesData ? `<img src="${fotoAntesData}">` : '<span>📷 Antes</span>';
+  document.getElementById('preview-depois').innerHTML = fotoDepoisData ? `<img src="${fotoDepoisData}">` : '<span>📷 Depois</span>';
+  document.getElementById('f-antes').value = '';
+  document.getElementById('f-depois').value = '';
+
+  limparLinhasServico(); // edição é sempre de um serviço só, por registro
+  entrarNoModoEdicao();
+  window.scrollTo({top:0, behavior:'smooth'});
+}
+
+function entrarNoModoEdicao(){
+  document.getElementById('aviso-editando').classList.remove('hidden');
+  document.getElementById('btn-salvar').textContent = 'Salvar Alterações';
+  document.getElementById('btn-add-servico').classList.add('hidden');
+}
+
+function sairDoModoEdicao(){
+  editandoId = null;
+  document.getElementById('aviso-editando').classList.add('hidden');
+  document.getElementById('btn-salvar').textContent = 'Salvar Registro';
+  document.getElementById('btn-add-servico').classList.remove('hidden');
+}
+
+function cancelarEdicao(){
+  resetForm();
+  document.querySelector('.tab[data-tab="lista"]').click();
 }
 
 async function salvarRegistro(){
   const cidade = document.getElementById('f-cidade').value.trim();
   const ruaId = document.getElementById('f-rua').value;
-  const servico = document.getElementById('f-servico').value;
-  const unidadeServico = unidadeDoServico(servico);
-  const isValorFixo = unidadeServico === 'R$';
-  const isLinear = unidadeServico === 'm';
-  const extensao = isValorFixo ? '' : document.getElementById('f-extensao').value;
-  const largura = (isValorFixo || isLinear) ? '' : document.getElementById('f-largura').value;
-  const lados = isValorFixo ? '' : (document.getElementById('f-lados').value || '1');
-  const valor = isValorFixo ? document.getElementById('f-valor').value : '';
   const equipe = document.getElementById('f-equipe').value.trim();
   const data = document.getElementById('f-data').value;
   const obs = document.getElementById('f-obs').value.trim();
 
-  if(!cidade || !ruaId || !servico || !data){
-    alert('Preencha ao menos Cidade, Rua, Serviço e Data.');
-    return;
-  }
-  if(isValorFixo && !valor){
-    alert('Informe o Valor (R$) do custo mensal dessa cidade.');
+  if(!cidade || !ruaId || !data){
+    alert('Preencha ao menos Cidade, Rua e Data.');
     return;
   }
 
+  // Em modo edição só existe a linha principal (não dá pra editar vários
+  // serviços de uma vez). Criando um registro novo, a linha principal + as
+  // linhas extras adicionadas em "+ Outro serviço nesta mesma rua" viram,
+  // cada uma, um registro separado — todas com a mesma rua, data, equipe,
+  // observações e fotos.
+  const linhas = editandoId
+    ? [lerLinhaServico('f')]
+    : [lerLinhaServico('f'), ...extrasServico.map(seq=>lerLinhaServico('se'+seq))];
+
+  for(const l of linhas){
+    if(!l.servico){
+      alert('Selecione o serviço em todas as linhas (ou remova as que não for usar).');
+      return;
+    }
+    if(unidadeDoServico(l.servico) === 'R$' && !l.valor){
+      alert('Informe o Valor (R$) do custo mensal fixo para o serviço "' + l.servico + '".');
+      return;
+    }
+  }
+
   const btn = document.getElementById('btn-salvar');
-  btn.disabled = true; btn.textContent = 'Salvando...';
+  const editando = !!editandoId;
+  btn.disabled = true;
+  btn.textContent = editando ? 'Salvando alterações...' : (linhas.length > 1 ? `Salvando ${linhas.length} serviços...` : 'Salvando...');
   try{
-    await api('POST', '/api/entries', {
-      cidade, ruaId, extensao, largura, lados, valor, servico, equipe, data, obs,
-      fotoAntes: fotoAntesData, fotoDepois: fotoDepoisData
-    });
-    toast('Registro salvo ✓');
+    if(editando){
+      const l = linhas[0];
+      await api('PUT', '/api/entries/' + encodeURIComponent(editandoId), {
+        cidade, ruaId, equipe, data, obs,
+        servico: l.servico, extensao: l.extensao, largura: l.largura, lados: l.lados, valor: l.valor,
+        fotoAntes: fotoAntesData, fotoDepois: fotoDepoisData
+      });
+      toast('Registro atualizado ✓');
+    } else {
+      for(const l of linhas){
+        await api('POST', '/api/entries', {
+          cidade, ruaId, equipe, data, obs,
+          servico: l.servico, extensao: l.extensao, largura: l.largura, lados: l.lados, valor: l.valor,
+          fotoAntes: fotoAntesData, fotoDepois: fotoDepoisData
+        });
+      }
+      toast(linhas.length > 1 ? linhas.length + ' registros salvos ✓' : 'Registro salvo ✓');
+    }
     resetForm();
+    if(editando) document.querySelector('.tab[data-tab="lista"]').click();
   }catch(e){
-    alert('Não consegui salvar o registro. ' + e.message);
+    alert('Não consegui salvar. ' + e.message);
   }finally{
-    btn.disabled = false; btn.textContent = 'Salvar Registro';
+    btn.disabled = false; btn.textContent = editandoId ? 'Salvar Alterações' : 'Salvar Registro';
   }
 }
 
@@ -492,6 +666,7 @@ async function renderLista(){
         ${e.fotoDepois?`<img src="${e.fotoDepois}">`:''}
       </div>`:''}
       <div class="entry-actions">
+        <button class="edit" onclick="editarRegistro('${e.id}')">Editar</button>
         <button class="del" onclick="excluirRegistro('${e.id}')">Excluir</button>
       </div>
     </div>
@@ -1124,6 +1299,22 @@ function slugCidadeArquivo(cidade){
   return '_' + cidade.normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/[^a-zA-Z0-9]+/g,'-').replace(/^-+|-+$/g,'').toLowerCase();
 }
 
+// Número de contrato a mostrar no relatório: se uma cidade específica foi
+// escolhida no filtro, usa o contrato cadastrado para ELA (aba Cidades);
+// sem isso — ou em "Todas as cidades", que mistura várias — cai no campo
+// geral "Contrato / Nº Processo" da aba Exportar.
+function contratoParaRelatorio(cidadeFiltro){
+  if(cidadeFiltro){
+    if(souAdmin()){
+      const c = CIDADES.find(c=>c.nome === cidadeFiltro);
+      if(c && c.contrato) return c.contrato;
+    } else if(CURRENT_USER.cidadeNome === cidadeFiltro && CURRENT_USER.cidadeContrato){
+      return CURRENT_USER.cidadeContrato;
+    }
+  }
+  return CONFIG.contrato || '';
+}
+
 function exportarMedicao(){
  try {
   const mes = document.getElementById('exp-mes').value;
@@ -1138,31 +1329,14 @@ function exportarMedicao(){
   const datasOrdenadas = entries.map(e=>e.data).sort();
   const periodo = datasOrdenadas.length ? datasOrdenadas[0].split('-').reverse().join('/') + ' a ' + datasOrdenadas[datasOrdenadas.length-1].split('-').reverse().join('/') : '';
 
-  const resumoMap = {};
-  entries.forEach(e=>{
-    if(!resumoMap[e.servico]) resumoMap[e.servico] = {area:0, valor:0, count:0, unidades:new Set()};
-    resumoMap[e.servico].area += areaTotal(e) || 0;
-    resumoMap[e.servico].valor += parseFloat(e.valor) || 0;
-    resumoMap[e.servico].count += 1;
-    if(!entryIsValorFixo(e)) resumoMap[e.servico].unidades.add(e.unidade || 'm²');
-  });
-  function unidadeLabelDoResumo(r){
-    if(r.unidades.size === 0) return '';
-    if(r.unidades.size === 1) return [...r.unidades][0];
-    return 'unid. variadas';
-  }
   const totalArea = entries.reduce((s,e)=>s+(entryIsValorFixo(e)?0:(areaTotal(e)||0)),0);
   const totalValor = entries.reduce((s,e)=>s+(parseFloat(e.valor)||0),0);
   // Só dá pra somar a "quantidade medida" de todos os registros num total só
   // quando todo mundo usa a mesma unidade (m², m ou ha) — misturar unidades
-  // num total geral não faz sentido. Quando há mais de uma, o quadro "Resumo
-  // por Serviço" abaixo já mostra o total certo de cada serviço.
+  // num total geral não faz sentido; nesse caso mostramos um rótulo genérico.
   const unidadesGerais = new Set(entries.filter(e=>!entryIsValorFixo(e)).map(e=>e.unidade || 'm²'));
   const totalAreaUnica = unidadesGerais.size === 1 ? totalArea.toLocaleString('pt-BR') + ' ' + [...unidadesGerais][0] : null;
-  // Tabela principal aponta pro resumo por serviço; o próprio resumo (que já
-  // é a quebra por unidade) aponta pras linhas dele mesmo, não pra si próprio.
-  const totalAreaTxtPrincipal = totalAreaUnica !== null ? totalAreaUnica : (unidadesGerais.size === 0 ? '' : 'ver resumo abaixo');
-  const totalAreaTxtResumo = totalAreaUnica !== null ? totalAreaUnica : (unidadesGerais.size === 0 ? '' : 'ver linhas acima');
+  const totalAreaTxtPrincipal = totalAreaUnica !== null ? totalAreaUnica : (unidadesGerais.size === 0 ? '' : '(unidades variadas)');
 
   const win = window.open('', '_blank');
   if(!win){ alert('O navegador bloqueou a abertura da medição.\n\nToque em "Gerar Medição" novamente ou, se aparecer um aviso de pop-up bloqueado, toque nele e escolha "Permitir".'); return; }
@@ -1206,7 +1380,7 @@ function exportarMedicao(){
 
   <div class="identificacao">
     <div><b>Mês de Referência</b> <span>${label}</span></div>
-    <div><b>Contrato / Nº Processo</b> <span>${cfg.contrato || '(não informado)'}</span></div>
+    <div><b>Contrato / Nº Processo</b> <span>${contratoParaRelatorio(cidadeFiltro) || '(não informado)'}</span></div>
     <div><b>Cidade(s)</b> <span>${cidades}</span></div>
     <div><b>Período de Execução</b> <span>${periodo}</span></div>
   </div>
@@ -1243,29 +1417,6 @@ function exportarMedicao(){
       <td>${totalAreaTxtPrincipal}</td>
       <td>${formatMoeda(totalValor)}</td>
       <td colspan="4"></td>
-    </tr></tfoot>
-  </table>
-
-  <h2 class="secao">Resumo por Serviço</h2>
-  <table>
-    <thead><tr><th>Serviço</th><th>Quantidade Total</th><th>Valor Total (R$)</th><th>Nº de Ruas/Trechos</th></tr></thead>
-    <tbody>`;
-  Object.keys(resumoMap).sort().forEach(serv=>{
-    const r = resumoMap[serv];
-    const unidadeLabel = unidadeLabelDoResumo(r);
-    html += `<tr>
-      <td class="left">${serv}</td>
-      <td>${r.area.toLocaleString('pt-BR')}${unidadeLabel?' '+unidadeLabel:''}</td>
-      <td>${formatMoeda(r.valor)}</td>
-      <td>${r.count}</td>
-    </tr>`;
-  });
-  html += `</tbody>
-    <tfoot><tr>
-      <td class="left">TOTAL GERAL</td>
-      <td>${totalAreaTxtResumo}</td>
-      <td>${formatMoeda(totalValor)}</td>
-      <td>${entries.length}</td>
     </tr></tfoot>
   </table>
 
@@ -1342,7 +1493,7 @@ function exportarFotos(){
 
   <div class="identificacao">
     <div><b>Mês de Referência</b> <span>${label}</span></div>
-    <div><b>Contrato / Nº Processo</b> <span>${cfg.contrato || '(não informado)'}</span></div>
+    <div><b>Contrato / Nº Processo</b> <span>${contratoParaRelatorio(cidadeFiltro) || '(não informado)'}</span></div>
     <div><b>Cidade(s)</b> <span>${cidades}</span></div>
     <div><b>Período de Execução</b> <span>${periodo}</span></div>
   </div>
