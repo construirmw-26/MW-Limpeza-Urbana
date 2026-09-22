@@ -24,9 +24,17 @@ function unidadeDoServico(nome){
 // Serviços — usado para calcular o valor final de cada lançamento e o total
 // de cada serviço no relatório de Medição. Não se aplica a serviços "R$"
 // (custo fixo mensal), que já têm o valor digitado direto no registro.
-function valorUnitarioDoServico(nome){
+// Cada cidade pode ter seu próprio valor pra esse serviço (contratos
+// diferentes por cidade); se a cidade não tiver um valor específico
+// cadastrado, cai no valor padrão do serviço.
+function valorUnitarioDoServico(nome, cidadeNome){
   const s = SERVICOS.find(s=>s.nome===nome);
-  return s && s.valorUnitario ? parseFloat(s.valorUnitario) || 0 : 0;
+  if(!s) return 0;
+  const cidadeObj = cidadeNome ? CIDADES.find(c=>c.nome===cidadeNome) : null;
+  if(cidadeObj && s.precosPorCidade && s.precosPorCidade[cidadeObj.id] !== undefined && s.precosPorCidade[cidadeObj.id] !== null && s.precosPorCidade[cidadeObj.id] !== ''){
+    return parseFloat(s.precosPorCidade[cidadeObj.id]) || 0;
+  }
+  return s.valorUnitario ? parseFloat(s.valorUnitario) || 0 : 0;
 }
 // Um registro já salvo guarda sua própria unidade (denormalizada no momento
 // da criação); registros antigos (antes dessa mudança) não têm esse campo,
@@ -357,15 +365,17 @@ function toggleServicoFieldsGeneric(idServico, idGrpMedidas, idGrpValor, idGrpLa
   document.getElementById(idGrpMedidas).style.display = isValorFixo ? 'none' : '';
   document.getElementById(idGrpValor).style.display = isValorFixo ? '' : 'none';
   document.getElementById(idGrpLargura).style.display = isLinear ? 'none' : '';
-  // Serviços "R$" têm um valor mensal padrão cadastrado na aba Serviços —
-  // pré-preenche o campo Valor ao escolher o serviço (só quando ainda está
-  // vazio, pra não sobrescrever o que a pessoa já digitou; num registro em
-  // edição, editarRegistro() preenche o valor real logo depois desta chamada,
-  // então o padrão aqui não atrapalha).
+  // Serviços "R$" têm um valor mensal padrão cadastrado na aba Serviços (pode
+  // variar por cidade) — pré-preenche o campo Valor ao escolher o serviço
+  // usando o valor da cidade já selecionada (só quando ainda está vazio, pra
+  // não sobrescrever o que a pessoa já digitou; num registro em edição,
+  // editarRegistro() preenche o valor real logo depois desta chamada, então
+  // o padrão aqui não atrapalha).
   if(isValorFixo){
     const valorInput = document.getElementById(idServico.replace('-servico','-valor'));
     if(valorInput && !valorInput.value){
-      const padrao = valorUnitarioDoServico(servico);
+      const cidadeAtual = document.getElementById('f-cidade').value;
+      const padrao = valorUnitarioDoServico(servico, cidadeAtual);
       if(padrao) valorInput.value = padrao;
     }
   }
@@ -417,10 +427,7 @@ function linhaServicoHTML(seq){
           </div>
         </div>
         <label>Lados executados</label>
-        <select id="se${seq}-lados">
-          <option value="1">1 lado</option>
-          <option value="2">2 lados</option>
-        </select>
+        <input type="number" id="se${seq}-lados" min="1" step="1" value="1" placeholder="Ex: 1">
       </div>
       <div id="se${seq}-grp-valor" style="display:none;">
         <label>Valor (R$) — custo mensal fixo da cidade</label>
@@ -1176,6 +1183,20 @@ async function atualizarServicoValorUnitario(id, valorUnitario){
   }
 }
 
+// Valor específico de um serviço numa cidade (contratos diferentes cobram
+// valores diferentes pelo mesmo serviço) — quando não cadastrado, o relatório
+// cai de volta no "valor padrão" acima.
+async function salvarPrecoCidade(servicoId, cidadeId){
+  const input = document.getElementById('preco-'+servicoId+'-'+cidadeId);
+  const valor = input.value;
+  try{
+    SERVICOS = await api('PUT', '/api/servicos/' + encodeURIComponent(servicoId), { precoCidadeId: cidadeId, precoValor: valor });
+    toast('Valor da cidade salvo ✓');
+  }catch(e){
+    toast(e.message || 'Não consegui salvar o valor dessa cidade.');
+  }
+}
+
 function removerServico(id, nome){
   confirmarAcao('Remover "'+nome+'" da lista de serviços? Registros já salvos com esse serviço não são apagados, mas a meta definida para ele será removida.', async ()=>{
     try{
@@ -1190,6 +1211,7 @@ function removerServico(id, nome){
 
 async function renderServicos(){
   await refreshServicos();
+  await refreshCidades(); // precisa da lista atual de cidades pra montar os valores por cidade
   const container = document.getElementById('servicos-lista');
   if(SERVICOS.length===0){
     servicoSelecionadoId = null;
@@ -1225,7 +1247,20 @@ async function renderServicos(){
       <button class="btn btn-outline" style="margin-top:6px;" onclick="atualizarServicoValorUnitario('${s.id}', document.getElementById('edit-servico-valor-${s.id}').value)">Salvar valor</button>
       <div class="note" style="margin-top:6px;">${s.unidade === 'R$'
         ? 'Esse valor só serve de padrão: ao lançar um registro novo desse serviço, o campo Valor já vem preenchido com ele, mas ainda dá pra mudar naquele lançamento específico.'
-        : `Esse valor é usado para calcular o valor final desse serviço no relatório de Medição (quantidade medida × valor por ${s.unidade}).`}</div>
+        : `Esse valor é usado para calcular o valor final desse serviço no relatório de Medição (quantidade medida × valor por ${s.unidade}), quando a cidade não tiver um valor específico cadastrado abaixo.`}</div>
+
+      ${CIDADES.length > 0 ? `
+      <label style="margin-top:14px;">Valor por cidade</label>
+      <div class="note">Cada cidade pode cobrar um valor diferente pra esse serviço (contratos diferentes). Deixe em branco pra usar o valor padrão acima.</div>
+      ${CIDADES.map(c=>`
+        <div style="display:flex;gap:8px;align-items:center;margin-top:8px;">
+          <span style="flex:1;font-size:14px;">${c.nome}</span>
+          <input type="number" step="0.01" min="0" style="width:110px;margin:0;" id="preco-${s.id}-${c.id}" value="${(s.precosPorCidade && s.precosPorCidade[c.id] !== undefined && s.precosPorCidade[c.id] !== null) ? s.precosPorCidade[c.id] : ''}" placeholder="padrão">
+          <button class="btn btn-outline" style="width:auto;margin:0;padding:9px 12px;font-size:12.5px;" onclick="salvarPrecoCidade('${s.id}','${c.id}')">Salvar</button>
+        </div>
+      `).join('')}
+      ` : `<div class="note" style="margin-top:14px;">Cadastre cidades na aba "Cidades" para poder definir um valor específico por cidade.</div>`}
+
       <div class="note" style="margin-top:8px;">O nome do serviço não pode ser alterado depois de cadastrado, para não desalinhar dos registros e metas já lançados. Para corrigir o nome, cadastre um novo serviço e remova este.</div>
     </div>
   `;
@@ -1424,17 +1459,18 @@ function exportarMedicao(){
   function valorCalculadoEntry(e){
     if(entryIsValorFixo(e)) return parseFloat(e.valor)||0;
     const area = areaTotal(e);
-    return area === null ? 0 : area * valorUnitarioDoServico(e.servico);
+    return area === null ? 0 : area * valorUnitarioDoServico(e.servico, e.cidade);
   }
 
   const totalArea = entries.reduce((s,e)=>s+(entryIsValorFixo(e)?0:(areaTotal(e)||0)),0);
   const totalValor = entries.reduce((s,e)=>s+valorCalculadoEntry(e),0);
   // Só dá pra somar a "quantidade medida" de todos os registros num total só
   // quando todo mundo usa a mesma unidade (m², m ou ha) — misturar unidades
-  // num total geral não faz sentido; nesse caso mostramos um rótulo genérico.
+  // num total geral não faz sentido, então nesse caso a célula fica em branco
+  // (o total de cada serviço já aparece certinho no subtotal de cada um).
   const unidadesGerais = new Set(entries.filter(e=>!entryIsValorFixo(e)).map(e=>e.unidade || 'm²'));
   const totalAreaUnica = unidadesGerais.size === 1 ? totalArea.toLocaleString('pt-BR') + ' ' + [...unidadesGerais][0] : null;
-  const totalAreaTxtPrincipal = totalAreaUnica !== null ? totalAreaUnica : (unidadesGerais.size === 0 ? '' : '(unidades variadas)');
+  const totalAreaTxtPrincipal = totalAreaUnica !== null ? totalAreaUnica : '';
 
   const win = window.open('', '_blank');
   if(!win){ alert('O navegador bloqueou a abertura da medição.\n\nToque em "Gerar Medição" novamente ou, se aparecer um aviso de pop-up bloqueado, toque nele e escolha "Permitir".'); return; }
@@ -1508,6 +1544,7 @@ function exportarMedicao(){
   let grupoServico = null;
   let subArea = 0, subValor = 0;
   let subUnidades = new Set();
+  let subPrecos = new Set(); // valores unitários distintos vistos no grupo (varia por cidade)
   let grupoIsValorFixo = false;
   const resumoServicos = []; // um item por serviço, pra montar o "Resumo por Serviço" no final
   entries.forEach((e,i)=>{
@@ -1516,13 +1553,20 @@ function exportarMedicao(){
 
     if(grupoServico !== null && e.servico !== grupoServico){
       html += linhaSubtotalServico(grupoServico, subArea, subUnidades);
-      resumoServicos.push({ nome: grupoServico, area: subArea, valor: subValor, unidades: subUnidades, isValorFixo: grupoIsValorFixo });
-      subArea = 0; subValor = 0; subUnidades = new Set();
+      resumoServicos.push({ nome: grupoServico, area: subArea, valor: subValor, unidades: subUnidades, precos: subPrecos, isValorFixo: grupoIsValorFixo });
+      subArea = 0; subValor = 0; subUnidades = new Set(); subPrecos = new Set();
     }
     grupoServico = e.servico;
     grupoIsValorFixo = isValorFixo;
     const valorEntry = valorCalculadoEntry(e);
-    if(!isValorFixo && area !== null){ subArea += area; subUnidades.add(e.unidade || 'm²'); }
+    if(!isValorFixo && area !== null){
+      subArea += area;
+      subUnidades.add(e.unidade || 'm²');
+      // Cada cidade pode ter um valor diferente pra esse serviço — se o
+      // grupo tiver mais de um valor distinto, o resumo mostra um aviso em
+      // vez de um número só (que estaria errado pra parte dos lançamentos).
+      subPrecos.add(formatMoeda(valorUnitarioDoServico(e.servico, e.cidade)) + ' / ' + (e.unidade || 'm²'));
+    }
     subValor += valorEntry;
 
     html += `<tr>
@@ -1541,7 +1585,7 @@ function exportarMedicao(){
   });
   if(grupoServico !== null){
     html += linhaSubtotalServico(grupoServico, subArea, subUnidades);
-    resumoServicos.push({ nome: grupoServico, area: subArea, valor: subValor, unidades: subUnidades, isValorFixo: grupoIsValorFixo });
+    resumoServicos.push({ nome: grupoServico, area: subArea, valor: subValor, unidades: subUnidades, precos: subPrecos, isValorFixo: grupoIsValorFixo });
   }
 
   html += `</tbody>
@@ -1559,15 +1603,19 @@ function exportarMedicao(){
     </tr></thead>
     <tbody>
       ${resumoServicos.map(r=>{
-        // Cada serviço tem sua própria unidade de medida e seu próprio valor
-        // por unidade (cadastrados na aba Serviços) — por isso a quantidade e
-        // o valor unitário aqui são sempre os daquele serviço específico.
+        // Cada serviço tem sua própria unidade de medida, e o valor por
+        // unidade pode variar por cidade (contratos diferentes) — por isso
+        // só mostramos um valor único quando todos os lançamentos do grupo
+        // usaram o mesmo valor; se misturar cidades com valores diferentes,
+        // avisamos em vez de mostrar um número que estaria errado pra parte
+        // dos lançamentos (o Valor Total continua sempre certo, calculado
+        // lançamento por lançamento).
         const qtdTxt = r.isValorFixo
           ? '—'
           : (r.unidades.size === 1 ? r.area.toLocaleString('pt-BR') + ' ' + [...r.unidades][0] : (r.unidades.size === 0 ? '' : '(unidades variadas)'));
         const unitTxt = r.isValorFixo
           ? 'Valor fixo mensal'
-          : (r.unidades.size === 1 ? formatMoeda(valorUnitarioDoServico(r.nome)) + ' / ' + [...r.unidades][0] : '—');
+          : (r.precos.size === 1 ? [...r.precos][0] : (r.precos.size === 0 ? '—' : '(valores variados por cidade)'));
         return `<tr>
           <td class="left">${r.nome}</td>
           <td>${qtdTxt}</td>
