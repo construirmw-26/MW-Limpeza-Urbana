@@ -458,13 +458,15 @@ const server = http.createServer(async (req, res) => {
       // a unidade ou remove. O nome não muda depois de criado, pra não
       // desalinhar dos registros e metas já lançados (que guardam o serviço
       // pelo nome, não por id).
-      // O valor cobrado por unidade (valorUnitario) é informação sensível de
-      // preço — só o administrador pode ver, então é removido da resposta
-      // pra quem não é admin (mesmo que peçam a API direto, não só pela tela).
+      // O valor cobrado (valorUnitario e precosPorCidade — cada cidade pode
+      // ter um valor diferente pro mesmo serviço, por causa de contratos
+      // diferentes) é informação sensível de preço — só o administrador pode
+      // ver, então é removido da resposta pra quem não é admin (mesmo que
+      // peçam a API direto, não só pela tela).
       if (urlPath === "/api/servicos") {
         if (method === "GET") {
           const lista = user.role === "admin" ? state.servicos : state.servicos.map((s) => {
-            const { valorUnitario, ...semValor } = s;
+            const { valorUnitario, precosPorCidade, ...semValor } = s;
             return semValor;
           });
           return sendJSON(res, 200, lista);
@@ -480,7 +482,7 @@ const server = http.createServer(async (req, res) => {
           if (state.servicos.some((s) => s.nome.toLowerCase() === nome.toLowerCase())) {
             return sendJSON(res, 409, { erro: "Esse serviço já está cadastrado." });
           }
-          const novo = { id: crypto.randomUUID(), nome, unidade, valorUnitario, criadoEm: new Date().toISOString() };
+          const novo = { id: crypto.randomUUID(), nome, unidade, valorUnitario, precosPorCidade: {}, criadoEm: new Date().toISOString() };
           state.servicos.push(novo);
           persist();
           return sendJSON(res, 201, state.servicos);
@@ -500,6 +502,20 @@ const server = http.createServer(async (req, res) => {
         }
         if (body.valorUnitario !== undefined) {
           alvo.valorUnitario = body.valorUnitario === "" ? 0 : parseFloat(body.valorUnitario) || 0;
+        }
+        // Valor específico de uma cidade pra esse serviço (contratos
+        // diferentes cobram valores diferentes pelo mesmo serviço). Enviar
+        // precoValor vazio remove a customização (volta a usar o padrão).
+        if (body.precoCidadeId !== undefined) {
+          const cidadeId = String(body.precoCidadeId || "").trim();
+          const cidadeObj = state.cidades.find((c) => c.id === cidadeId);
+          if (!cidadeObj) return sendJSON(res, 400, { erro: "Cidade não encontrada." });
+          if (!alvo.precosPorCidade) alvo.precosPorCidade = {};
+          if (body.precoValor === undefined || body.precoValor === "") {
+            delete alvo.precosPorCidade[cidadeId];
+          } else {
+            alvo.precosPorCidade[cidadeId] = parseFloat(body.precoValor) || 0;
+          }
         }
         persist();
         return sendJSON(res, 200, state.servicos);
