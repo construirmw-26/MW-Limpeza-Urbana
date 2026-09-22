@@ -1462,15 +1462,12 @@ function exportarMedicao(){
     return area === null ? 0 : area * valorUnitarioDoServico(e.servico, e.cidade);
   }
 
-  const totalArea = entries.reduce((s,e)=>s+(entryIsValorFixo(e)?0:(areaTotal(e)||0)),0);
   const totalValor = entries.reduce((s,e)=>s+valorCalculadoEntry(e),0);
-  // Só dá pra somar a "quantidade medida" de todos os registros num total só
-  // quando todo mundo usa a mesma unidade (m², m ou ha) — misturar unidades
-  // num total geral não faz sentido, então nesse caso a célula fica em branco
-  // (o total de cada serviço já aparece certinho no subtotal de cada um).
-  const unidadesGerais = new Set(entries.filter(e=>!entryIsValorFixo(e)).map(e=>e.unidade || 'm²'));
-  const totalAreaUnica = unidadesGerais.size === 1 ? totalArea.toLocaleString('pt-BR') + ' ' + [...unidadesGerais][0] : null;
-  const totalAreaTxtPrincipal = totalAreaUnica !== null ? totalAreaUnica : '';
+  // A linha TOTAL GERAL da tabela detalhada não soma mais a "quantidade
+  // medida" (metragem) de todos os serviços juntos — somar metragens de
+  // serviços diferentes (ex: m² de capina + m de meio-fio) não faz sentido,
+  // e mesmo quando bate a mesma unidade o total de cada serviço já aparece
+  // certinho no subtotal logo abaixo dele e na tabela "Resumo por Serviço".
 
   const win = window.open('', '_blank');
   if(!win){ alert('O navegador bloqueou a abertura da medição.\n\nToque em "Gerar Medição" novamente ou, se aparecer um aviso de pop-up bloqueado, toque nele e escolha "Permitir".'); return; }
@@ -1591,7 +1588,7 @@ function exportarMedicao(){
   html += `</tbody>
     <tfoot><tr>
       <td colspan="6" class="left">TOTAL GERAL</td>
-      <td>${totalAreaTxtPrincipal}</td>
+      <td></td>
       <td colspan="4"></td>
     </tr></tfoot>
   </table>
