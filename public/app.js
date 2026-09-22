@@ -24,9 +24,11 @@ function unidadeDoServico(nome){
 // Serviços — usado para calcular o valor final de cada lançamento e o total
 // de cada serviço no relatório de Medição. Não se aplica a serviços "R$"
 // (custo fixo mensal), que já têm o valor digitado direto no registro.
-// Cada cidade pode ter seu próprio valor pra esse serviço (contratos
-// diferentes por cidade); se a cidade não tiver um valor específico
-// cadastrado, cai no valor padrão do serviço.
+// Cada cidade tem seu próprio contrato, então cada cidade tem seu próprio
+// valor pra esse serviço — não existe mais um "valor padrão" geral: se a
+// cidade não tiver um valor específico cadastrado, o valor é 0 (na prática
+// o serviço nem deveria aparecer pra lançar registro nessa cidade — ver
+// servicoDisponivelNaCidade()).
 function valorUnitarioDoServico(nome, cidadeNome){
   const s = SERVICOS.find(s=>s.nome===nome);
   if(!s) return 0;
@@ -34,7 +36,39 @@ function valorUnitarioDoServico(nome, cidadeNome){
   if(cidadeObj && s.precosPorCidade && s.precosPorCidade[cidadeObj.id] !== undefined && s.precosPorCidade[cidadeObj.id] !== null && s.precosPorCidade[cidadeObj.id] !== ''){
     return parseFloat(s.precosPorCidade[cidadeObj.id]) || 0;
   }
-  return s.valorUnitario ? parseFloat(s.valorUnitario) || 0 : 0;
+  return 0;
+}
+
+// Um serviço só "existe" numa cidade quando o administrador cadastrou um
+// valor específico pra ela na aba Serviços — algumas cidades não têm todos
+// os serviços (contratos diferentes), então o serviço fica escondido nas
+// cidades onde ele não tem valor cadastrado. Pra quem não é admin, o
+// servidor não manda os valores (são sensíveis), só a lista de cidades
+// onde o serviço tem valor cadastrado (cidadesDisponiveis) — dá pra saber
+// se o serviço "existe" ali sem saber quanto custa.
+function servicoDisponivelNaCidade(nomeServico, cidadeId){
+  if(!cidadeId) return false;
+  const s = SERVICOS.find(s=>s.nome===nomeServico);
+  if(!s) return false;
+  if(s.precosPorCidade){
+    const v = s.precosPorCidade[cidadeId];
+    return v !== undefined && v !== null && v !== '';
+  }
+  if(s.cidadesDisponiveis) return s.cidadesDisponiveis.includes(cidadeId);
+  return false;
+}
+
+// Id da cidade selecionada agora em "+ Registro" (admin escolhe pelo nome;
+// encarregado já tem a cidade fixa, sem precisar olhar CIDADES que pra ele
+// nem vem carregada).
+function cidadeIdAtualForm(){
+  const nomeCidade = document.getElementById('f-cidade').value;
+  if(!nomeCidade) return null;
+  if(souAdmin()){
+    const c = CIDADES.find(c=>c.nome === nomeCidade);
+    return c ? c.id : null;
+  }
+  return (CURRENT_USER && CURRENT_USER.cidadeId) || null;
 }
 // Um registro já salvo guarda sua própria unidade (denormalizada no momento
 // da criação); registros antigos (antes dessa mudança) não têm esse campo,
@@ -236,6 +270,7 @@ async function atualizarRuasPelaCidade(){
   if(!nomeCidade){
     RUAS = [];
     popularSelectRua();
+    popularSelectServico(); // cidade limpa: lista de serviços some (cada cidade tem os seus)
     return;
   }
   let cidadeId = null;
@@ -251,6 +286,7 @@ async function atualizarRuasPelaCidade(){
     RUAS = [];
   }
   popularSelectRua();
+  popularSelectServico(); // recarrega os serviços disponíveis pra cidade escolhida
 }
 
 function popularSelectRua(){
@@ -277,23 +313,38 @@ function popularSelectRua(){
 
 // Serviços "R$" (custo mensal fixo, tipo "Equipe Padrão") são ajuda de
 // custo lançada só pelo administrador — não aparecem pra encarregado
-// escolher, nem no "+ Registro" principal nem nas linhas extras.
+// escolher, nem no "+ Registro" principal nem nas linhas extras. Além
+// disso, cada cidade só mostra os serviços que têm valor cadastrado pra
+// ela (ver servicoDisponivelNaCidade) — sem cidade escolhida ainda, não
+// dá pra saber quais serviços ela tem, então a lista fica vazia.
 function servicosDisponiveisParaLancar(){
-  return souAdmin() ? SERVICOS : SERVICOS.filter(s=>s.unidade !== 'R$');
+  const porPermissao = souAdmin() ? SERVICOS : SERVICOS.filter(s=>s.unidade !== 'R$');
+  const cidadeId = cidadeIdAtualForm();
+  if(!cidadeId) return [];
+  return porPermissao.filter(s=>servicoDisponivelNaCidade(s.nome, cidadeId));
 }
 
 function popularSelectServico(){
   const sel = document.getElementById('f-servico');
   const aviso = document.getElementById('sem-servico-aviso');
+  const cidadeEscolhida = !!document.getElementById('f-cidade').value;
   const disponiveis = servicosDisponiveisParaLancar();
-  if(disponiveis.length === 0){
+  const atual = sel.value;
+  // Editando um registro antigo cujo serviço não tem mais valor cadastrado
+  // nessa cidade: mantemos ele na lista pra não travar a edição, só não
+  // deixamos escolher esse serviço num lançamento novo.
+  const extra = (editandoId && atual && !disponiveis.some(s=>s.nome===atual)) ? SERVICOS.find(s=>s.nome===atual) : null;
+  const lista = extra ? [...disponiveis, extra] : disponiveis;
+  if(lista.length === 0){
     sel.innerHTML = '<option value="">Nenhum serviço cadastrado</option>';
     sel.disabled = true;
+    aviso.textContent = cidadeEscolhida
+      ? 'Essa cidade ainda não tem nenhum serviço com valor cadastrado — peça ao administrador para cadastrar o valor na aba "Serviços".'
+      : 'Escolha a cidade primeiro para ver os serviços cadastrados nela.';
     aviso.classList.remove('hidden');
   } else {
-    const atual = sel.value;
-    sel.innerHTML = '<option value="">Selecione...</option>' + disponiveis.map(s=>`<option value="${s.nome}">${s.nome}</option>`).join('');
-    if(disponiveis.some(s=>s.nome===atual)) sel.value = atual;
+    sel.innerHTML = '<option value="">Selecione...</option>' + lista.map(s=>`<option value="${s.nome}">${s.nome}</option>`).join('');
+    if(lista.some(s=>s.nome===atual)) sel.value = atual;
     sel.disabled = false;
     aviso.classList.add('hidden');
   }
@@ -1123,25 +1174,17 @@ function removerDocumento(cidadeId, docId){
 }
 
 // ------------------------------ Serviços ------------------------------------
-let servicoSelecionadoId = null; // serviço em foco na aba Serviços (escolhido no select)
+// A aba Serviços agora é organizada por CIDADE, não por serviço: cada cidade
+// tem seu próprio contrato, então o mesmo serviço pode custar um valor
+// diferente (ou nem existir) em cada cidade. O admin escolhe a cidade e
+// cadastra ali o valor de cada serviço que ela usa — serviço sem valor
+// cadastrado numa cidade simplesmente não aparece pra lançar registro lá
+// (ver servicoDisponivelNaCidade()).
+let cidadeServicosSelId = null; // cidade em foco na aba Serviços (escolhida no select)
 
-function selecionarServico(id){
-  servicoSelecionadoId = id;
+function selecionarCidadeServicos(id){
+  cidadeServicosSelId = id;
   renderServicos();
-}
-
-function removerServicoSelecionado(){
-  const s = SERVICOS.find(x=>x.id===servicoSelecionadoId);
-  if(!s) return;
-  removerServico(s.id, s.nome);
-}
-
-// Pra serviço "R$" (custo fixo mensal) o campo de valor vira um "padrão":
-// só pré-preenche o Valor ao lançar um registro novo desse serviço, mas
-// ainda dá pra mudar em cada lançamento — por isso o rótulo muda.
-function toggleNovoServicoValorUnitario(){
-  const isFixo = document.getElementById('novo-servico-unidade').value === 'R$';
-  document.getElementById('label-novo-servico-valor').textContent = isFixo ? 'Valor mensal padrão (R$)' : 'Valor cobrado por unidade (R$)';
 }
 
 async function adicionarServico(){
@@ -1149,15 +1192,12 @@ async function adicionarServico(){
   const nome = nomeInput.value.trim();
   if(!nome) return;
   const unidade = document.getElementById('novo-servico-unidade').value;
-  const valorUnitario = document.getElementById('novo-servico-valor-unitario').value;
   try{
-    SERVICOS = await api('POST', '/api/servicos', { nome, unidade, valorUnitario });
+    SERVICOS = await api('POST', '/api/servicos', { nome, unidade });
     nomeInput.value = '';
-    document.getElementById('novo-servico-valor-unitario').value = '';
-    servicoSelecionadoId = SERVICOS.length ? SERVICOS[SERVICOS.length-1].id : null; // mostra o serviço recém-criado
     await renderServicos();
     popularSelectServico();
-    toast('Serviço adicionado ✓');
+    toast('Serviço adicionado ✓ — agora cadastre o valor dele em cada cidade que vai usá-lo, logo abaixo.');
   }catch(e){
     toast(e.message || 'Não consegui adicionar o serviço.');
   }
@@ -1174,31 +1214,23 @@ async function atualizarServicoUnidade(id, unidade){
   }
 }
 
-async function atualizarServicoValorUnitario(id, valorUnitario){
-  try{
-    SERVICOS = await api('PUT', '/api/servicos/' + encodeURIComponent(id), { valorUnitario });
-    toast('Valor salvo ✓');
-  }catch(e){
-    toast(e.message || 'Não consegui salvar o valor.');
-  }
-}
-
-// Valor específico de um serviço numa cidade (contratos diferentes cobram
-// valores diferentes pelo mesmo serviço) — quando não cadastrado, o relatório
-// cai de volta no "valor padrão" acima.
+// Valor específico de um serviço numa cidade — é o único valor que existe
+// agora (não tem mais "valor padrão" geral); em branco = a cidade não usa
+// esse serviço, e ele some do "+ Registro" pra quem lança nessa cidade.
 async function salvarPrecoCidade(servicoId, cidadeId){
   const input = document.getElementById('preco-'+servicoId+'-'+cidadeId);
   const valor = input.value;
   try{
     SERVICOS = await api('PUT', '/api/servicos/' + encodeURIComponent(servicoId), { precoCidadeId: cidadeId, precoValor: valor });
-    toast('Valor da cidade salvo ✓');
+    toast(valor === '' ? 'Serviço removido dessa cidade ✓' : 'Valor salvo ✓');
+    popularSelectServico();
   }catch(e){
     toast(e.message || 'Não consegui salvar o valor dessa cidade.');
   }
 }
 
 function removerServico(id, nome){
-  confirmarAcao('Remover "'+nome+'" da lista de serviços? Registros já salvos com esse serviço não são apagados, mas a meta definida para ele será removida.', async ()=>{
+  confirmarAcao('Remover "'+nome+'" da lista de serviços (de todas as cidades)? Registros já salvos com esse serviço não são apagados, mas a meta definida para ele será removida.', async ()=>{
     try{
       SERVICOS = await api('DELETE', '/api/servicos/' + encodeURIComponent(id));
       await renderServicos();
@@ -1211,58 +1243,69 @@ function removerServico(id, nome){
 
 async function renderServicos(){
   await refreshServicos();
-  await refreshCidades(); // precisa da lista atual de cidades pra montar os valores por cidade
+  await refreshCidades();
   const container = document.getElementById('servicos-lista');
-  if(SERVICOS.length===0){
-    servicoSelecionadoId = null;
-    container.innerHTML = '<div class="empty">Nenhum serviço cadastrado ainda.<br>Adicione acima os serviços executados pela equipe.</div>';
+
+  if(CIDADES.length === 0){
+    container.innerHTML = '<div class="empty">Cadastre uma cidade na aba "Cidades" primeiro — cada serviço tem um valor por cidade, então é preciso ter ao menos uma cidade cadastrada.</div>';
     return;
   }
-  if(!servicoSelecionadoId || !SERVICOS.some(s=>s.id===servicoSelecionadoId)){
-    servicoSelecionadoId = SERVICOS[0].id;
+  if(!cidadeServicosSelId || !CIDADES.some(c=>c.id===cidadeServicosSelId)){
+    cidadeServicosSelId = CIDADES[0].id;
   }
-  const opcoesServico = SERVICOS.map(s=>`<option value="${s.id}" ${s.id===servicoSelecionadoId?'selected':''}>${s.nome}</option>`).join('');
-  const s = SERVICOS.find(x=>x.id===servicoSelecionadoId);
+  const cidadeSel = CIDADES.find(c=>c.id===cidadeServicosSelId);
+  const opcoesCidade = CIDADES.map(c=>`<option value="${c.id}" ${c.id===cidadeServicosSelId?'selected':''}>${c.nome}</option>`).join('');
+
+  const blocoValoresPorCidade = SERVICOS.length === 0
+    ? '<div class="note">Nenhum serviço cadastrado ainda — adicione um acima primeiro.</div>'
+    : SERVICOS.map(s=>{
+        const valorAtual = (s.precosPorCidade && s.precosPorCidade[cidadeSel.id] !== undefined && s.precosPorCidade[cidadeSel.id] !== null) ? s.precosPorCidade[cidadeSel.id] : '';
+        return `
+        <div style="display:flex;gap:8px;align-items:center;margin-top:10px;border-top:1px solid #E2E5EA;padding-top:10px;">
+          <div style="flex:1;">
+            <div style="font-weight:700;">${s.nome}</div>
+            <div style="font-size:12px;color:#6B7280;">${s.unidade === 'R$' ? 'valor fixo mensal' : 'valor por ' + s.unidade}</div>
+          </div>
+          <input type="number" step="0.01" min="0" style="width:110px;margin:0;" id="preco-${s.id}-${cidadeSel.id}" value="${valorAtual}" placeholder="sem valor">
+          <button class="btn btn-outline" style="width:auto;margin:0;padding:9px 12px;font-size:12.5px;" onclick="salvarPrecoCidade('${s.id}','${cidadeSel.id}')">Salvar</button>
+        </div>`;
+      }).join('');
+
+  const listaTodosServicos = SERVICOS.length === 0 ? '' : `
+    <div class="card">
+      <label>Todos os serviços cadastrados</label>
+      <div class="note">Aqui é só o cadastro geral (nome e unidade) — o valor de cada um é definido por cidade, no bloco acima.</div>
+      ${SERVICOS.map(s=>`
+        <div style="margin-top:10px;border-top:1px solid #E2E5EA;padding-top:10px;">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
+            <span style="font-weight:700;">${s.nome}</span>
+            <button class="btn btn-outline" style="width:auto;margin:0;padding:6px 12px;font-size:12.5px;color:var(--danger);" onclick="removerServico('${s.id}','${s.nome}')">Remover</button>
+          </div>
+          <select style="margin-top:6px;" onchange="atualizarServicoUnidade('${s.id}', this.value)">
+            <option value="m²" ${s.unidade==='m²'?'selected':''}>m² — área (extensão × largura)</option>
+            <option value="m" ${s.unidade==='m'?'selected':''}>m — comprimento linear (só extensão)</option>
+            <option value="ha" ${s.unidade==='ha'?'selected':''}>ha — área em hectares (extensão × largura)</option>
+            <option value="R$" ${s.unidade==='R$'?'selected':''}>R$ — valor fixo mensal</option>
+          </select>
+        </div>
+      `).join('')}
+      <div class="note" style="margin-top:8px;">O nome do serviço não pode ser alterado depois de cadastrado, para não desalinhar dos registros e metas já lançados. Para corrigir o nome, cadastre um novo serviço e remova este.</div>
+    </div>
+  `;
 
   container.innerHTML = `
     <div class="card">
-      <label>Serviços cadastrados</label>
-      <select id="servico-select" onchange="selecionarServico(this.value)">${opcoesServico}</select>
-      <button onclick="removerServicoSelecionado()" style="width:100%;padding:11px;border-radius:9px;border:1px solid #F1D1CC;background:#fff;color:var(--danger);font-weight:700;margin-top:8px;cursor:pointer;">Remover serviço selecionado</button>
+      <label>Cidade</label>
+      <select id="servico-cidade-select" onchange="selecionarCidadeServicos(this.value)">${opcoesCidade}</select>
+      <div class="note" style="margin-top:6px;">Cada cidade tem seu próprio contrato — escolha a cidade pra ver e cadastrar o valor de cada serviço nela. Um serviço só aparece pra lançar registro nas cidades onde ele tiver um valor cadastrado.</div>
     </div>
     <div class="entry">
       <div class="entry-top">
-        <div class="entry-title">${s.nome}</div>
-        <span class="badge">${s.unidade}</span>
+        <div class="entry-title">Valores em ${cidadeSel.nome}</div>
       </div>
-      <label style="margin-top:10px;">Unidade de medida</label>
-      <select onchange="atualizarServicoUnidade('${s.id}', this.value)">
-        <option value="m²" ${s.unidade==='m²'?'selected':''}>m² — área (extensão × largura)</option>
-        <option value="m" ${s.unidade==='m'?'selected':''}>m — comprimento linear (só extensão)</option>
-        <option value="ha" ${s.unidade==='ha'?'selected':''}>ha — área em hectares (extensão × largura)</option>
-        <option value="R$" ${s.unidade==='R$'?'selected':''}>R$ — valor fixo mensal</option>
-      </select>
-      <label style="margin-top:10px;">${s.unidade === 'R$' ? 'Valor mensal padrão (R$)' : `Valor cobrado por ${s.unidade} (R$)`}</label>
-      <input type="number" step="0.01" min="0" id="edit-servico-valor-${s.id}" value="${s.valorUnitario || ''}" placeholder="Ex: 2.50">
-      <button class="btn btn-outline" style="margin-top:6px;" onclick="atualizarServicoValorUnitario('${s.id}', document.getElementById('edit-servico-valor-${s.id}').value)">Salvar valor</button>
-      <div class="note" style="margin-top:6px;">${s.unidade === 'R$'
-        ? 'Esse valor só serve de padrão: ao lançar um registro novo desse serviço, o campo Valor já vem preenchido com ele, mas ainda dá pra mudar naquele lançamento específico.'
-        : `Esse valor é usado para calcular o valor final desse serviço no relatório de Medição (quantidade medida × valor por ${s.unidade}), quando a cidade não tiver um valor específico cadastrado abaixo.`}</div>
-
-      ${CIDADES.length > 0 ? `
-      <label style="margin-top:14px;">Valor por cidade</label>
-      <div class="note">Cada cidade pode cobrar um valor diferente pra esse serviço (contratos diferentes). Deixe em branco pra usar o valor padrão acima.</div>
-      ${CIDADES.map(c=>`
-        <div style="display:flex;gap:8px;align-items:center;margin-top:8px;">
-          <span style="flex:1;font-size:14px;">${c.nome}</span>
-          <input type="number" step="0.01" min="0" style="width:110px;margin:0;" id="preco-${s.id}-${c.id}" value="${(s.precosPorCidade && s.precosPorCidade[c.id] !== undefined && s.precosPorCidade[c.id] !== null) ? s.precosPorCidade[c.id] : ''}" placeholder="padrão">
-          <button class="btn btn-outline" style="width:auto;margin:0;padding:9px 12px;font-size:12.5px;" onclick="salvarPrecoCidade('${s.id}','${c.id}')">Salvar</button>
-        </div>
-      `).join('')}
-      ` : `<div class="note" style="margin-top:14px;">Cadastre cidades na aba "Cidades" para poder definir um valor específico por cidade.</div>`}
-
-      <div class="note" style="margin-top:8px;">O nome do serviço não pode ser alterado depois de cadastrado, para não desalinhar dos registros e metas já lançados. Para corrigir o nome, cadastre um novo serviço e remova este.</div>
+      ${blocoValoresPorCidade}
     </div>
+    ${listaTodosServicos}
   `;
 }
 
