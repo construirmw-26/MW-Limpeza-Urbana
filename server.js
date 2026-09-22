@@ -467,7 +467,11 @@ const server = http.createServer(async (req, res) => {
         if (method === "GET") {
           const lista = user.role === "admin" ? state.servicos : state.servicos.map((s) => {
             const { valorUnitario, precosPorCidade, ...semValor } = s;
-            return semValor;
+            // Não manda os valores (sensível, só admin vê), mas manda quais
+            // cidades têm esse serviço "ativado" (têm algum valor cadastrado)
+            // — sem isso ninguém além do admin conseguiria saber quais
+            // serviços aparecem pra lançar em cada cidade.
+            return { ...semValor, cidadesDisponiveis: Object.keys(precosPorCidade || {}) };
           });
           return sendJSON(res, 200, lista);
         }
