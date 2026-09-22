@@ -195,10 +195,7 @@
             </div>
           </div>
           <label>Lados executados</label>
-          <select id="f-lados">
-            <option value="1">1 lado</option>
-            <option value="2">2 lados</option>
-          </select>
+          <input type="number" id="f-lados" min="1" step="1" value="1" placeholder="Ex: 1">
         </div>
 
         <div id="grp-valor" style="display:none;">
@@ -301,18 +298,14 @@
         <label>Nome do serviço</label>
         <input type="text" id="novo-servico-nome" placeholder="Ex: Poda de Árvores" onkeydown="if(event.key==='Enter'){event.preventDefault();adicionarServico();}">
         <label>Unidade de medida</label>
-        <select id="novo-servico-unidade" onchange="toggleNovoServicoValorUnitario()">
+        <select id="novo-servico-unidade">
           <option value="m²">m² — área (extensão × largura)</option>
           <option value="m">m — comprimento linear (só extensão)</option>
           <option value="ha">ha — área em hectares (extensão × largura)</option>
           <option value="R$">R$ — valor fixo mensal (como "Equipe Padrão")</option>
         </select>
-        <div id="grp-novo-servico-valor">
-          <label id="label-novo-servico-valor">Valor cobrado por unidade (R$)</label>
-          <input type="number" step="0.01" min="0" id="novo-servico-valor-unitario" placeholder="Ex: 2.50">
-        </div>
         <button class="btn btn-primary" onclick="adicionarServico()">+ Adicionar serviço</button>
-        <div class="note">Cadastre aqui os serviços executados pela equipe. Eles aparecem para escolher no campo "Serviço Executado" ao criar um novo registro em "+ Registro", e também na aba "Metas". Escolha "m²" ou "ha" para serviços medidos por área, "m" para serviços medidos só por comprimento (sem largura, como meio-fio), ou "R$" para custos fixos mensais. Para os medidos por área/comprimento, o valor cobrado por unidade é usado para calcular o valor final no relatório de Medição. Para "R$", o valor é só um padrão que já vem preenchido ao lançar um registro — ainda dá pra mudar em cada lançamento.</div>
+        <div class="note">Cadastre aqui os serviços executados pela equipe. Escolha "m²" ou "ha" para serviços medidos por área, "m" para serviços medidos só por comprimento (sem largura, como meio-fio), ou "R$" para custos fixos mensais (ajuda de custo, como "Equipe Padrão"). Depois de criar o serviço, cadastre o valor dele em cada cidade logo abaixo — cada cidade tem seu próprio contrato, então o mesmo serviço pode custar um valor diferente (ou nem existir) em cada uma. Um serviço só aparece pra escolher no "+ Registro" nas cidades onde ele tiver um valor cadastrado.</div>
       </div>
       <div id="servicos-lista"></div>
     </div>
