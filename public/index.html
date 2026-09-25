@@ -357,8 +357,22 @@
       <div class="card">
         <h2>Exportar do mês selecionado</h2>
         <label>Mês de referência</label>
-        <select id="exp-mes"></select>
-        <label>Cidade</label>
+        <select id="exp-mes" onchange="limparPeriodoExport()"></select>
+
+        <label style="margin-top:14px;">Ou escolha um período específico</label>
+        <div class="row2">
+          <div>
+            <label style="font-size:12px;">Data inicial</label>
+            <input type="date" id="exp-data-inicio" onchange="usarPeriodoExport()">
+          </div>
+          <div>
+            <label style="font-size:12px;">Data final</label>
+            <input type="date" id="exp-data-fim" onchange="usarPeriodoExport()">
+          </div>
+        </div>
+        <div class="note" id="exp-periodo-nota" style="margin-top:-4px;">Preencher a data inicial e/ou final substitui o mês escolhido acima.</div>
+
+        <label style="margin-top:14px;">Cidade</label>
         <select id="exp-cidade"><option value="">Todas as cidades</option></select>
 
         <button class="btn btn-primary" onclick="exportarMedicao()">📄 Gerar Medição (imprimir/PDF)</button>
