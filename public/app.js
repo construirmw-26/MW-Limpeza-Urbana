@@ -715,8 +715,56 @@ function popularFiltros(){
   const valorExpCidade = expCidade.value;
   expCidade.innerHTML = '<option value="">Todas as cidades</option>' + cidadesEntries.map(c=>`<option value="${c}">${c}</option>`).join('');
   if(cidadesEntries.includes(valorExpCidade)) expCidade.value = valorExpCidade;
+  usarPeriodoExport(); // mantém o mês desabilitado/nota certa se um período já estava escolhido
 
   popularSelectCidade();
+}
+
+// ---- Filtro de período na aba Exportar: mês (padrão) OU um período de
+// datas específico, que quando preenchido substitui o mês. ----
+function periodoExportAtivo(){
+  return !!(document.getElementById('exp-data-inicio').value || document.getElementById('exp-data-fim').value);
+}
+
+function usarPeriodoExport(){
+  const ativo = periodoExportAtivo();
+  document.getElementById('exp-mes').disabled = ativo;
+  document.getElementById('exp-periodo-nota').textContent = ativo
+    ? 'Usando o período escolhido acima (o mês selecionado foi ignorado). Apague as datas pra voltar a usar o mês.'
+    : 'Preencher a data inicial e/ou final substitui o mês escolhido acima.';
+}
+
+function limparPeriodoExport(){
+  document.getElementById('exp-data-inicio').value = '';
+  document.getElementById('exp-data-fim').value = '';
+  usarPeriodoExport();
+}
+
+// Devolve a função de filtro por data (pro Array.filter) e o texto do
+// período pronto pra mostrar nos relatórios, já considerando se tem um
+// período específico escolhido ou se é pra usar o mês de referência.
+function filtroPeriodoExport(){
+  const inicio = document.getElementById('exp-data-inicio').value;
+  const fim = document.getElementById('exp-data-fim').value;
+  if(inicio || fim){
+    const label = inicio && fim
+      ? inicio.split('-').reverse().join('/') + ' a ' + fim.split('-').reverse().join('/')
+      : inicio
+        ? 'A partir de ' + inicio.split('-').reverse().join('/')
+        : 'Até ' + fim.split('-').reverse().join('/');
+    return { filtro: (e)=>(!inicio || e.data >= inicio) && (!fim || e.data <= fim), label };
+  }
+  const mes = document.getElementById('exp-mes').value;
+  return { filtro: (e)=>!mes || mesKey(e.data) === mes, label: mes ? mesRef(mes+'-01') : 'Todos os períodos' };
+}
+
+// Texto curto do período pra usar no nome do arquivo baixado (CSV).
+function periodoSlugExport(){
+  const inicio = document.getElementById('exp-data-inicio').value;
+  const fim = document.getElementById('exp-data-fim').value;
+  if(inicio || fim) return (inicio || 'inicio') + '_a_' + (fim || 'fim');
+  const mes = document.getElementById('exp-mes').value;
+  return mes || 'todos';
 }
 
 async function renderLista(){
@@ -1423,9 +1471,9 @@ function csvEscape(v){
 }
 
 function exportarCSV(){
-  const mes = document.getElementById('exp-mes').value;
+  const { filtro } = filtroPeriodoExport();
   const cidade = document.getElementById('exp-cidade').value;
-  const entries = ENTRIES.filter(e=>(!mes || mesKey(e.data)===mes) && (!cidade || e.cidade===cidade))
+  const entries = ENTRIES.filter(e=>filtro(e) && (!cidade || e.cidade===cidade))
     .sort((a,b)=>(a.cidade||'').localeCompare(b.cidade||'') || (a.data||'').localeCompare(b.data||''));
   if(entries.length===0){ alert('Nenhum registro para esse filtro.'); return; }
 
@@ -1446,7 +1494,7 @@ function exportarCSV(){
   const blob = new Blob(['﻿'+linhas.join('\n')], {type:'text/csv;charset=utf-8'});
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
-  a.download = 'medicao_' + (mes||'todos') + slugCidadeArquivo(cidade) + '.csv';
+  a.download = 'medicao_' + periodoSlugExport() + slugCidadeArquivo(cidade) + '.csv';
   a.click();
   toast('Planilha exportada ✓');
 }
@@ -1480,17 +1528,16 @@ function exportarMedicao(){
   // administrador (a aba Exportar já fica escondida pra quem não é admin;
   // essa checagem é só uma segunda trava).
   if(!souAdmin()){ alert('Apenas o administrador tem acesso a este relatório.'); return; }
-  const mes = document.getElementById('exp-mes').value;
+  const { filtro, label } = filtroPeriodoExport();
   const cidadeFiltro = document.getElementById('exp-cidade').value;
   // Agrupado por serviço (e dentro de cada serviço, por cidade/rua) — assim
   // fica fácil ver e conferir o total de cada serviço, com uma linha de
   // subtotal logo depois do último lançamento daquele serviço.
-  const entries = ENTRIES.filter(e=>(!mes || mesKey(e.data)===mes) && (!cidadeFiltro || e.cidade===cidadeFiltro))
+  const entries = ENTRIES.filter(e=>filtro(e) && (!cidadeFiltro || e.cidade===cidadeFiltro))
     .sort((a,b)=>(a.servico||'').localeCompare(b.servico||'') || (a.cidade||'').localeCompare(b.cidade||'') || (a.rua||'').localeCompare(b.rua||''));
   if(entries.length===0){ alert('Nenhum registro para esse filtro.'); return; }
 
   const cfg = CONFIG;
-  const label = mes ? mesRef(mes+'-01') : 'Todos os períodos';
   const cidades = [...new Set(entries.map(e=>e.cidade))].join(', ');
   const datasOrdenadas = entries.map(e=>e.data).sort();
   const periodo = datasOrdenadas.length ? datasOrdenadas[0].split('-').reverse().join('/') + ' a ' + datasOrdenadas[datasOrdenadas.length-1].split('-').reverse().join('/') : '';
@@ -1682,16 +1729,15 @@ function exportarFotos(){
  try {
   // Aba Exportar é restrita ao administrador; segunda trava aqui também.
   if(!souAdmin()){ alert('Apenas o administrador tem acesso a este relatório.'); return; }
-  const mes = document.getElementById('exp-mes').value;
+  const { filtro, label } = filtroPeriodoExport();
   const cidadeFiltro = document.getElementById('exp-cidade').value;
   // Serviço "R$" (ajuda de custo mensal, tipo "Equipe Padrão") não tem foto
   // nem local — não faz sentido entrar no relatório fotográfico.
-  const entries = ENTRIES.filter(e=>(!mes || mesKey(e.data)===mes) && (!cidadeFiltro || e.cidade===cidadeFiltro) && !entryIsValorFixo(e))
+  const entries = ENTRIES.filter(e=>filtro(e) && (!cidadeFiltro || e.cidade===cidadeFiltro) && !entryIsValorFixo(e))
     .sort((a,b)=>(a.cidade||'').localeCompare(b.cidade||'') || (a.rua||'').localeCompare(b.rua||''));
   if(entries.length===0){ alert('Nenhum registro com foto para esse filtro.'); return; }
 
   const cfg = CONFIG;
-  const label = mes ? mesRef(mes+'-01') : 'Todos os períodos';
   const cidades = [...new Set(entries.map(e=>e.cidade))].join(', ');
   const datasOrdenadas = entries.map(e=>e.data).sort();
   const periodo = datasOrdenadas.length ? datasOrdenadas[0].split('-').reverse().join('/') + ' a ' + datasOrdenadas[datasOrdenadas.length-1].split('-').reverse().join('/') : '';
