@@ -185,9 +185,16 @@ const server = http.createServer(async (req, res) => {
         if (!user || !verificarSenha(senha, user.senha)) {
           return sendJSON(res, 401, { erro: "Usuário ou senha inválidos" });
         }
-        const { token, expiraEm } = criarSessao(user.id);
+        const { token } = criarSessao(user.id);
+        // Cookie de sessão SEM Max-Age/Expires (de propósito): assim o
+        // navegador apaga o cookie quando o app/navegador é fechado de
+        // verdade, e da próxima vez que abrir precisa entrar com a senha de
+        // novo — em vez de ficar "lembrado" por dias. A sessão em si ainda
+        // tem um limite de 30 dias no servidor (SESSAO_DIAS em lib/auth.js),
+        // que só serve de segurança extra caso o cookie sobreviva de algum
+        // jeito (por exemplo, se o navegador do celular só "pausar" o app
+        // em vez de encerrar de verdade).
         setCookie(res, COOKIE_NAME, token, {
-          maxAgeSeconds: Math.round((expiraEm - Date.now()) / 1000),
           secure: process.env.NODE_ENV === "production",
         });
         return sendJSON(res, 200, usuarioPublico(user));
