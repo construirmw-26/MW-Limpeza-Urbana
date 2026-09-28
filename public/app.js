@@ -387,17 +387,56 @@ document.addEventListener('DOMContentLoaded', ()=>{
 });
 
 // ---------------------- Fotos (captura no celular) ------------------------
+// A câmera do celular tira fotos de vários MB — guardar isso puro no
+// registro deixa o banco de dados enorme (cada foto vira um texto gigante
+// no JSON) e é por isso que o app e o relatório fotográfico ficavam lentos
+// mesmo com poucas fotos. Antes de guardar, redimensionamos a foto pra no
+// máximo 1600px no lado maior e comprimimos como JPEG — fica leve (uns
+// 100-300 KB em vez de vários MB) sem perder qualidade visível num
+// relatório impresso/PDF.
+async function comprimirFoto(file, maxLado, qualidade){
+  let bitmap;
+  try{
+    // 'from-image' já aplica a rotação certa (fotos tiradas na vertical no
+    // celular vêm com essa informação separada do pixel em si — sem isso
+    // elas apareceriam deitadas no relatório).
+    bitmap = await createImageBitmap(file, { imageOrientation: 'from-image' });
+  }catch(e){
+    // Navegador sem suporte a createImageBitmap com orientação — cai pra um
+    // jeito mais simples (funciona, só pode sair sem a rotação certa em
+    // fotos tiradas na vertical).
+    bitmap = await new Promise((resolve, reject)=>{
+      const img = new Image();
+      img.onload = ()=>resolve(img);
+      img.onerror = ()=>reject(new Error('Não consegui abrir essa imagem.'));
+      img.src = URL.createObjectURL(file);
+    });
+  }
+  const largura = bitmap.width, altura = bitmap.height;
+  const escala = Math.min(1, maxLado / Math.max(largura, altura));
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Math.round(largura * escala));
+  canvas.height = Math.max(1, Math.round(altura * escala));
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+  return canvas.toDataURL('image/jpeg', qualidade);
+}
+
 function setupPhotoInput(inputId, previewId, setter){
   const input = document.getElementById(inputId);
-  input.addEventListener('change', ()=>{
+  input.addEventListener('change', async ()=>{
     const file = input.files[0];
     if(!file) return;
-    const reader = new FileReader();
-    reader.onload = e=>{
-      setter(e.target.result);
-      document.getElementById(previewId).innerHTML = '<img src="'+e.target.result+'">';
-    };
-    reader.readAsDataURL(file);
+    document.getElementById(previewId).innerHTML = '<span>Processando foto...</span>';
+    try{
+      const dataUrl = await comprimirFoto(file, 1600, 0.72);
+      setter(dataUrl);
+      document.getElementById(previewId).innerHTML = '<img src="'+dataUrl+'">';
+    }catch(e){
+      toast('Não consegui processar essa foto — tenta tirar de novo ou escolher outra.');
+      document.getElementById(previewId).innerHTML = '<span>⚠️ Falha ao carregar</span>';
+      input.value = '';
+    }
   });
 }
 
@@ -1584,8 +1623,15 @@ function exportarMedicao(){
     h2.secao{font-size:13px;color:#00632B;margin:0 0 8px;}
     thead{display:table-header-group;}
     tr{page-break-inside:avoid;}
-    @media print { body{padding:0;} }
+    .voltar-bar{position:sticky;top:0;background:#00632B;color:#fff;padding:10px 14px;display:flex;align-items:center;justify-content:space-between;gap:10px;margin:-20px -20px 16px;font-size:12.5px;z-index:10;}
+    .voltar-bar button{background:#fff;color:#00632B;border:none;border-radius:6px;padding:8px 14px;font-weight:700;font-size:13px;cursor:pointer;white-space:nowrap;}
+    @media print { body{padding:0;} .voltar-bar{display:none;} }
   </style></head><body>
+
+  <div class="voltar-bar">
+    <span>Pronto! Use "Imprimir → Salvar como PDF" pra baixar.</span>
+    <button onclick="window.close(); setTimeout(function(){ alert('Se a aba não fechou sozinha, troque de aba ou toque em voltar no navegador pra retornar ao app.'); }, 400);">← Voltar pro app</button>
+  </div>
 
   <div class="letterhead">
     <div class="brand">
@@ -1776,8 +1822,15 @@ function exportarFotos(){
     .assinatura{flex:1;text-align:center;}
     .linha{border-top:1px solid #1E2430;margin-bottom:6px;padding-top:6px;}
     .assinatura .cargo{font-size:11px;color:#6B7280;}
-    @media print { body{padding:0;} .item{page-break-inside:avoid;} }
+    .voltar-bar{position:sticky;top:0;background:#00632B;color:#fff;padding:10px 14px;display:flex;align-items:center;justify-content:space-between;gap:10px;margin:-20px -20px 16px;font-size:12.5px;z-index:10;}
+    .voltar-bar button{background:#fff;color:#00632B;border:none;border-radius:6px;padding:8px 14px;font-weight:700;font-size:13px;cursor:pointer;white-space:nowrap;}
+    @media print { body{padding:0;} .item{page-break-inside:avoid;} .voltar-bar{display:none;} }
   </style></head><body>
+
+  <div class="voltar-bar">
+    <span>Pronto! Use "Imprimir → Salvar como PDF" pra baixar.</span>
+    <button onclick="window.close(); setTimeout(function(){ alert('Se a aba não fechou sozinha, troque de aba ou toque em voltar no navegador pra retornar ao app.'); }, 400);">← Voltar pro app</button>
+  </div>
 
   <div class="letterhead">
     <div class="brand">
