@@ -7,7 +7,7 @@ const path = require("path");
 const fs = require("fs");
 const crypto = require("crypto");
 
-const { state, persist, UPLOADS_DIR } = require("./lib/db");
+const { state, persist, persistSync, UPLOADS_DIR } = require("./lib/db");
 const {
   sendJSON,
   readJSON,
@@ -782,3 +782,19 @@ const server = http.createServer(async (req, res) => {
 server.listen(PORT, () => {
   console.log(`Coleta de Campo rodando em http://localhost:${PORT}`);
 });
+
+// Ao desligar o processo (por exemplo, quando o Coolify troca pra uma nova
+// versão), grava o banco uma última vez de forma síncrona antes de sair —
+// como o salvamento normal agora é em segundo plano (persist(), em
+// lib/db.js), sem isso a última alteração feita bem antes do desligamento
+// poderia se perder caso ainda estivesse gravando.
+function encerrarComGravacaoFinal() {
+  try {
+    persistSync();
+  } catch (e) {
+    console.error("Falha ao gravar o banco de dados no desligamento:", e.message);
+  }
+  process.exit(0);
+}
+process.on("SIGTERM", encerrarComGravacaoFinal);
+process.on("SIGINT", encerrarComGravacaoFinal);
