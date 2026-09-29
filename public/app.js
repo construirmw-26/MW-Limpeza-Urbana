@@ -860,8 +860,8 @@ async function renderLista(){
       <div class="entry-sub" style="margin-top:8px;">${formatMedida(e)?formatMedida(e)+' · ':''}${e.equipe||''}</div>
       ${e.obs?`<div class="entry-sub" style="margin-top:4px;">${e.obs}</div>`:''}
       ${(e.fotoAntes||e.fotoDepois)?`<div class="entry-photos">
-        ${e.fotoAntes?`<img src="${e.fotoAntes}">`:''}
-        ${e.fotoDepois?`<img src="${e.fotoDepois}">`:''}
+        ${e.fotoAntes?`<img src="${e.fotoAntes}" loading="lazy">`:''}
+        ${e.fotoDepois?`<img src="${e.fotoDepois}" loading="lazy">`:''}
       </div>`:''}
       ${(souAdmin() || e.unidade !== 'R$') ? `
       <div class="entry-actions">
@@ -1828,7 +1828,7 @@ function exportarFotos(){
   </style></head><body>
 
   <div class="voltar-bar">
-    <span>Pronto! Use "Imprimir → Salvar como PDF" pra baixar.</span>
+    <span id="status-fotos">Carregando fotos, aguarde...</span>
     <button onclick="window.close(); setTimeout(function(){ alert('Se a aba não fechou sozinha, troque de aba ou toque em voltar no navegador pra retornar ao app.'); }, 400);">← Voltar pro app</button>
   </div>
 
@@ -1885,7 +1885,58 @@ function exportarFotos(){
       <div class="cargo">Fiscalização — Prefeitura Municipal</div>
     </div>
   </div>
-  <script>window.onload=()=>{setTimeout(()=>window.print(),400);}<\/script></body></html>`;
+  <script>
+  (function(){
+    // Antes, o relatório mandava imprimir 400ms depois de abrir, sem checar
+    // se as fotos já tinham carregado — em fotos grandes (principalmente as
+    // antigas, de antes da compressão) ou em internet de celular mais lenta,
+    // isso fazia o PDF sair com foto faltando, ou parecer "travado" enquanto
+    // as fotos ainda estavam baixando escondido atrás da tela de impressão.
+    // Agora espera de verdade as fotos carregarem (ou desistirem de tentar),
+    // mostrando o progresso, antes de mandar imprimir.
+    var jaChamou = false;
+    function chamarImpressao(){
+      if(jaChamou) return;
+      jaChamou = true;
+      var status = document.getElementById('status-fotos');
+      if(status) status.textContent = 'Pronto! Use "Imprimir → Salvar como PDF" pra baixar.';
+      setTimeout(function(){ window.print(); }, 200);
+    }
+    function esperarFotos(){
+      var imgs = document.querySelectorAll('.imgs img');
+      var total = imgs.length;
+      var status = document.getElementById('status-fotos');
+      if(total === 0){ chamarImpressao(); return; }
+      var prontos = 0;
+      function atualizaStatus(){
+        if(status) status.textContent = 'Carregando fotos... ' + prontos + '/' + total;
+      }
+      atualizaStatus();
+      function marcarPronto(){
+        prontos++;
+        atualizaStatus();
+        if(prontos >= total) chamarImpressao();
+      }
+      imgs.forEach(function(img){
+        if(img.complete) marcarPronto();
+        else {
+          img.addEventListener('load', marcarPronto);
+          img.addEventListener('error', marcarPronto);
+        }
+      });
+      // Se alguma foto travar pra sempre (internet ruim demais), não deixa
+      // esperando eternamente — depois de 25s imprime do jeito que estiver.
+      setTimeout(chamarImpressao, 25000);
+    }
+    // Chama direto, sem esperar o evento "load" da janela: esse script já
+    // roda depois que todas as tags <img> foram inseridas na página (está
+    // no fim do HTML), então o navegador já começou a baixar as fotos — só
+    // falta esperar cada uma terminar. (O evento "load" de uma janela criada
+    // via document.write não é confiável pra isso: em alguns navegadores ele
+    // dispara antes mesmo das fotos terminarem de carregar.)
+    esperarFotos();
+  })();
+  <\/script></body></html>`;
   win.document.write(html);
   win.document.close();
  } catch(err){
