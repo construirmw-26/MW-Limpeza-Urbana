@@ -25,6 +25,7 @@ const {
   usuarioPublico,
   cidadeDoUsuario,
 } = require("./lib/auth");
+const { escreverZip } = require("./lib/zip");
 
 const PORT = process.env.PORT || 3000;
 const PUBLIC_DIR = path.join(__dirname, "public");
@@ -590,6 +591,78 @@ const server = http.createServer(async (req, res) => {
         }
       }
 
+      // ---- Baixar fotos em ZIP (só administrador) ----
+      // Usa os mesmos filtros da aba Exportar (cidade + mês OU período) e
+      // organiza as fotos em pastas: Cidade/AAAA-MM-DD/Rua_Serviço_ANTES.jpg
+      // (a data no formato ano-mês-dia pra as pastas ficarem em ordem
+      // cronológica quando abertas no computador).
+      if (method === "GET" && urlPath === "/api/exportar/fotos.zip") {
+        if (user.role !== "admin") return sendJSON(res, 403, { erro: "Somente administradores" });
+        const url = new URL(req.url, "http://x");
+        const fCidade = url.searchParams.get("cidade") || "";
+        const fMes = url.searchParams.get("mes") || "";
+        const fInicio = url.searchParams.get("inicio") || "";
+        const fFim = url.searchParams.get("fim") || "";
+        const usaPeriodo = !!(fInicio || fFim);
+
+        const limpar = (s) =>
+          String(s || "")
+            .replace(/[\\/:*?"<>|\u0000-\u001f]/g, "")
+            .replace(/\s+/g, " ")
+            .trim()
+            .slice(0, 80) || "sem-nome";
+
+        const selecionados = state.entries
+          .filter((e) => (e.fotoAntes || e.fotoDepois))
+          .filter((e) => !fCidade || e.cidade === fCidade)
+          .filter((e) => {
+            const d = e.data || "";
+            if (usaPeriodo) return (!fInicio || d >= fInicio) && (!fFim || d <= fFim);
+            return !fMes || d.slice(0, 7) === fMes;
+          })
+          .sort((a, b) => (a.cidade || "").localeCompare(b.cidade || "") || (a.data || "").localeCompare(b.data || ""));
+
+        const arquivos = [];
+        const nomesUsados = new Set();
+        for (const e of selecionados) {
+          const pasta = limpar(e.cidade) + "/" + limpar(e.data);
+          let base = limpar(e.rua || "Sem rua");
+          if (e.numero) base += " " + limpar(e.numero);
+          base += " - " + limpar(e.servico);
+          for (const [campo, rotulo] of [["fotoAntes", "ANTES"], ["fotoDepois", "DEPOIS"]]) {
+            const u = e[campo];
+            if (!u || typeof u !== "string" || !u.startsWith("/uploads/")) continue;
+            const arquivoNoDisco = path.join(UPLOADS_DIR, path.basename(u));
+            const ext = path.extname(u) || ".jpg";
+            let nome = `${pasta}/${base} - ${rotulo}${ext}`;
+            let n = 2;
+            while (nomesUsados.has(nome)) nome = `${pasta}/${base} - ${rotulo} (${n++})${ext}`;
+            nomesUsados.add(nome);
+            arquivos.push({ nome, caminho: arquivoNoDisco });
+          }
+        }
+
+        if (arquivos.length === 0) {
+          return sendJSON(res, 404, { erro: "Nenhuma foto encontrada pra esse filtro." });
+        }
+
+        const periodo = usaPeriodo ? `${fInicio || "inicio"}_a_${fFim || "fim"}` : fMes || "todos";
+        const nomeZip = `Fotos_${limpar(fCidade || "Todas as cidades")}_${periodo}.zip`;
+        const nomeAscii = nomeZip.normalize("NFD").replace(/[^\x20-\x7e]/g, "").replace(/"/g, "");
+        res.writeHead(200, {
+          "Content-Type": "application/zip",
+          "Content-Disposition": `attachment; filename="${nomeAscii}"; filename*=UTF-8''${encodeURIComponent(nomeZip)}`,
+          "Cache-Control": "no-store",
+        });
+        try {
+          await escreverZip(res, arquivos);
+        } catch (e) {
+          // quem pediu fechou a conexão no meio (cancelou o download) — só encerra
+          res.destroy();
+        }
+        return;
+      }
+
       // ---- Registros (entries) ----
       // O administrador vê e mexe em tudo. Um encarregado só vê, cria e
       // apaga registros da cidade que foi atribuída a ele — mesmo que
@@ -654,6 +727,10 @@ const server = http.createServer(async (req, res) => {
             obs: String(body.obs || "").trim(),
             fotoAntes: salvarFotoBase64(body.fotoAntes),
             fotoDepois: salvarFotoBase64(body.fotoDepois),
+            // Versões leves (miniaturas) usadas na lista e no relatório
+            // fotográfico — geradas no celular junto com a foto completa.
+            fotoAntesMini: body.fotoAntes ? salvarFotoBase64(body.fotoAntesMini) : null,
+            fotoDepoisMini: body.fotoDepois ? salvarFotoBase64(body.fotoDepoisMini) : null,
             criadoPor: user.nome,
             criadoEm: new Date().toISOString(),
           };
@@ -725,24 +802,32 @@ const server = http.createServer(async (req, res) => {
         if (body.fotoAntes !== undefined && body.fotoAntes !== alvo.fotoAntes) {
           if (body.fotoAntes === null) {
             removerFotoSeForUpload(alvo.fotoAntes);
+            removerFotoSeForUpload(alvo.fotoAntesMini);
             alvo.fotoAntes = null;
+            alvo.fotoAntesMini = null;
           } else {
             const nova = salvarFotoBase64(body.fotoAntes);
             if (nova) {
               removerFotoSeForUpload(alvo.fotoAntes);
+              removerFotoSeForUpload(alvo.fotoAntesMini);
               alvo.fotoAntes = nova;
+              alvo.fotoAntesMini = salvarFotoBase64(body.fotoAntesMini);
             }
           }
         }
         if (body.fotoDepois !== undefined && body.fotoDepois !== alvo.fotoDepois) {
           if (body.fotoDepois === null) {
             removerFotoSeForUpload(alvo.fotoDepois);
+            removerFotoSeForUpload(alvo.fotoDepoisMini);
             alvo.fotoDepois = null;
+            alvo.fotoDepoisMini = null;
           } else {
             const nova = salvarFotoBase64(body.fotoDepois);
             if (nova) {
               removerFotoSeForUpload(alvo.fotoDepois);
+              removerFotoSeForUpload(alvo.fotoDepoisMini);
               alvo.fotoDepois = nova;
+              alvo.fotoDepoisMini = salvarFotoBase64(body.fotoDepoisMini);
             }
           }
         }
@@ -765,10 +850,40 @@ const server = http.createServer(async (req, res) => {
         if (alvo) {
           removerFotoSeForUpload(alvo.fotoAntes);
           removerFotoSeForUpload(alvo.fotoDepois);
+          removerFotoSeForUpload(alvo.fotoAntesMini);
+          removerFotoSeForUpload(alvo.fotoDepoisMini);
         }
         state.entries = state.entries.filter((e) => e.id !== id);
         persist();
         return sendJSON(res, 200, { ok: true });
+      }
+
+      // ---- Otimizar fotos antigas (só administrador) ----
+      // Recebe a miniatura (e, se a foto antiga for pesada demais, uma
+      // versão completa já comprimida) gerada no navegador do administrador,
+      // e troca no registro — apagando do disco o arquivo antigo substituído.
+      const otimizarMatch = urlPath.match(/^\/api\/entries\/([^/]+)\/otimizar-fotos$/);
+      if (otimizarMatch && method === "PUT") {
+        if (user.role !== "admin") return sendJSON(res, 403, { erro: "Somente administradores" });
+        const id = decodeURIComponent(otimizarMatch[1]);
+        const alvo = state.entries.find((e) => e.id === id);
+        if (!alvo) return sendJSON(res, 404, { erro: "Registro não encontrado." });
+        const body = await readJSON(req);
+        for (const campo of ["fotoAntes", "fotoDepois"]) {
+          if (!alvo[campo]) continue;
+          const mini = salvarFotoBase64(body[campo + "Mini"]);
+          if (mini) {
+            removerFotoSeForUpload(alvo[campo + "Mini"]);
+            alvo[campo + "Mini"] = mini;
+          }
+          const completa = salvarFotoBase64(body[campo]);
+          if (completa) {
+            removerFotoSeForUpload(alvo[campo]);
+            alvo[campo] = completa;
+          }
+        }
+        persist();
+        return sendJSON(res, 200, alvo);
       }
 
       return sendJSON(res, 404, { erro: "Rota não encontrada." });
