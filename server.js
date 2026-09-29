@@ -164,6 +164,17 @@ const server = http.createServer(async (req, res) => {
     const urlPath = req.url.split("?")[0];
     const method = req.method;
 
+    // ---- Verificação de saúde (pro Coolify checar se o app está
+    // respondendo de verdade, não só se o processo está de pé). Não exige
+    // login nem toca no banco — só confirma que o servidor está atendendo
+    // pedidos rapidamente. Fica logo no início de tudo, antes de qualquer
+    // outra rota, pra responder o mais rápido possível. ----
+    if (method === "GET" && urlPath === "/api/status") {
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: true }));
+      return;
+    }
+
     // ---- Arquivos enviados (fotos) ----
     if (method === "GET" && urlPath.startsWith("/uploads/")) {
       if (serveStatic(req, res, UPLOADS_DIR, urlPath.replace("/uploads", ""))) return;
