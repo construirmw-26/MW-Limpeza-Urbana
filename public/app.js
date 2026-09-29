@@ -11,6 +11,10 @@ let SERVICOS = []; // serviços cadastrados (aba Serviços) — {id, nome, unida
 let METAS = {};
 let CONFIG = {};
 let fotoAntesData = null, fotoDepoisData = null;
+// Miniatura da foto recém-tirada (só existe quando uma foto NOVA foi
+// escolhida no formulário; ao editar sem trocar a foto fica null e o
+// servidor mantém a miniatura que já tinha).
+let fotoAntesMini = null, fotoDepoisMini = null;
 let editandoId = null; // id do registro sendo editado, ou null quando é um lançamento novo
 
 // Unidade de medida de um serviço pelo nome (usada em "+ Registro" e nas
@@ -380,8 +384,8 @@ document.addEventListener('DOMContentLoaded', ()=>{
     });
   });
 
-  setupPhotoInput('f-antes','preview-antes', v=>fotoAntesData=v);
-  setupPhotoInput('f-depois','preview-depois', v=>fotoDepoisData=v);
+  setupPhotoInput('f-antes','preview-antes', (v, mini)=>{ fotoAntesData=v; fotoAntesMini=mini; });
+  setupPhotoInput('f-depois','preview-depois', (v, mini)=>{ fotoDepoisData=v; fotoDepoisMini=mini; });
 
   checarSessao();
 });
@@ -394,7 +398,7 @@ document.addEventListener('DOMContentLoaded', ()=>{
 // máximo 1600px no lado maior e comprimimos como JPEG — fica leve (uns
 // 100-300 KB em vez de vários MB) sem perder qualidade visível num
 // relatório impresso/PDF.
-async function comprimirFoto(file, maxLado, qualidade){
+async function carregarBitmap(file){
   let bitmap;
   try{
     // 'from-image' já aplica a rotação certa (fotos tiradas na vertical no
@@ -412,6 +416,10 @@ async function comprimirFoto(file, maxLado, qualidade){
       img.src = URL.createObjectURL(file);
     });
   }
+  return bitmap;
+}
+
+function redimensionarBitmap(bitmap, maxLado, qualidade){
   const largura = bitmap.width, altura = bitmap.height;
   const escala = Math.min(1, maxLado / Math.max(largura, altura));
   const canvas = document.createElement('canvas');
@@ -422,6 +430,31 @@ async function comprimirFoto(file, maxLado, qualidade){
   return canvas.toDataURL('image/jpeg', qualidade);
 }
 
+async function comprimirFoto(file, maxLado, qualidade){
+  return redimensionarBitmap(await carregarBitmap(file), maxLado, qualidade);
+}
+
+// Cada foto é guardada em DUAS versões: a "completa" (até 1600px, pra
+// quem precisar da foto em boa resolução — ZIP, abrir a foto sozinha) e uma
+// "miniatura" bem leve (até 800px, umas dezenas de KB) que é a usada na
+// lista de registros e no relatório fotográfico. No relatório a foto
+// aparece num quadrinho pequeno — não precisa baixar a versão grande pra
+// isso, e com a miniatura ele abre muito mais rápido.
+const MINI_LADO = 800, MINI_QUALIDADE = 0.65;
+async function gerarVersoesFoto(file){
+  const bitmap = await carregarBitmap(file);
+  return {
+    completa: redimensionarBitmap(bitmap, 1600, 0.72),
+    mini: redimensionarBitmap(bitmap, MINI_LADO, MINI_QUALIDADE),
+  };
+}
+
+// Qual versão mostrar numa tela/relatório: a miniatura se existir (fotos
+// novas e fotos antigas já otimizadas), senão a completa.
+function fotoParaExibir(e, campo){
+  return e[campo + 'Mini'] || e[campo] || null;
+}
+
 function setupPhotoInput(inputId, previewId, setter){
   const input = document.getElementById(inputId);
   input.addEventListener('change', async ()=>{
@@ -429,9 +462,9 @@ function setupPhotoInput(inputId, previewId, setter){
     if(!file) return;
     document.getElementById(previewId).innerHTML = '<span>Processando foto...</span>';
     try{
-      const dataUrl = await comprimirFoto(file, 1600, 0.72);
-      setter(dataUrl);
-      document.getElementById(previewId).innerHTML = '<img src="'+dataUrl+'">';
+      const v = await gerarVersoesFoto(file);
+      setter(v.completa, v.mini);
+      document.getElementById(previewId).innerHTML = '<img src="'+v.mini+'">';
     }catch(e){
       toast('Não consegui processar essa foto — tenta tirar de novo ou escolher outra.');
       document.getElementById(previewId).innerHTML = '<span>⚠️ Falha ao carregar</span>';
@@ -569,6 +602,7 @@ function resetForm(){
   document.getElementById('f-lados').value='1';
   document.getElementById('f-data').value = hoje();
   fotoAntesData = null; fotoDepoisData = null;
+  fotoAntesMini = null; fotoDepoisMini = null;
   document.getElementById('preview-antes').innerHTML = '<span>📷 Antes</span>';
   document.getElementById('preview-depois').innerHTML = '<span>📷 Depois</span>';
   document.getElementById('f-antes').value = '';
@@ -611,8 +645,9 @@ async function editarRegistro(id){
 
   fotoAntesData = e.fotoAntes || null;
   fotoDepoisData = e.fotoDepois || null;
-  document.getElementById('preview-antes').innerHTML = fotoAntesData ? `<img src="${fotoAntesData}">` : '<span>📷 Antes</span>';
-  document.getElementById('preview-depois').innerHTML = fotoDepoisData ? `<img src="${fotoDepoisData}">` : '<span>📷 Depois</span>';
+  fotoAntesMini = null; fotoDepoisMini = null;
+  document.getElementById('preview-antes').innerHTML = fotoAntesData ? `<img src="${fotoParaExibir(e,'fotoAntes')}">` : '<span>📷 Antes</span>';
+  document.getElementById('preview-depois').innerHTML = fotoDepoisData ? `<img src="${fotoParaExibir(e,'fotoDepois')}">` : '<span>📷 Depois</span>';
   document.getElementById('f-antes').value = '';
   document.getElementById('f-depois').value = '';
 
@@ -686,7 +721,8 @@ async function salvarRegistro(){
       await api('PUT', '/api/entries/' + encodeURIComponent(editandoId), {
         cidade, ruaId: ruaIdLinha, equipe, data, obs,
         servico: l.servico, extensao: l.extensao, largura: l.largura, lados: l.lados, valor: l.valor,
-        fotoAntes: fotoAntesData, fotoDepois: fotoDepoisData
+        fotoAntes: fotoAntesData, fotoDepois: fotoDepoisData,
+        fotoAntesMini: fotoAntesMini || undefined, fotoDepoisMini: fotoDepoisMini || undefined
       });
       toast('Registro atualizado ✓');
     } else {
@@ -695,7 +731,8 @@ async function salvarRegistro(){
         await api('POST', '/api/entries', {
           cidade, ruaId: ruaIdLinha, equipe, data, obs,
           servico: l.servico, extensao: l.extensao, largura: l.largura, lados: l.lados, valor: l.valor,
-          fotoAntes: fotoAntesData, fotoDepois: fotoDepoisData
+          fotoAntes: fotoAntesData, fotoDepois: fotoDepoisData,
+          fotoAntesMini: fotoAntesMini || undefined, fotoDepoisMini: fotoDepoisMini || undefined
         });
       }
       toast(linhas.length > 1 ? linhas.length + ' registros salvos ✓' : 'Registro salvo ✓');
@@ -860,8 +897,8 @@ async function renderLista(){
       <div class="entry-sub" style="margin-top:8px;">${formatMedida(e)?formatMedida(e)+' · ':''}${e.equipe||''}</div>
       ${e.obs?`<div class="entry-sub" style="margin-top:4px;">${e.obs}</div>`:''}
       ${(e.fotoAntes||e.fotoDepois)?`<div class="entry-photos">
-        ${e.fotoAntes?`<img src="${e.fotoAntes}" loading="lazy">`:''}
-        ${e.fotoDepois?`<img src="${e.fotoDepois}" loading="lazy">`:''}
+        ${e.fotoAntes?`<img src="${fotoParaExibir(e,'fotoAntes')}" loading="lazy">`:''}
+        ${e.fotoDepois?`<img src="${fotoParaExibir(e,'fotoDepois')}" loading="lazy">`:''}
       </div>`:''}
       ${(souAdmin() || e.unidade !== 'R$') ? `
       <div class="entry-actions">
@@ -1499,6 +1536,105 @@ async function salvarConfig(){
 async function renderFiltrosExport(){
   await Promise.all([refreshEntries(), refreshConfig()]);
   popularFiltros();
+  atualizarAvisoOtimizacao();
+}
+
+// ------------------------ Baixar fotos em ZIP ------------------------------
+function baixarFotosZip(){
+  if(!souAdmin()){ alert('Apenas o administrador pode baixar as fotos.'); return; }
+  const { filtro } = filtroPeriodoExport();
+  const cidade = document.getElementById('exp-cidade').value;
+  const comFoto = ENTRIES.filter(e=>filtro(e) && (!cidade || e.cidade===cidade) && (e.fotoAntes || e.fotoDepois));
+  if(comFoto.length===0){ alert('Nenhuma foto encontrada para esse filtro.'); return; }
+
+  const params = new URLSearchParams();
+  if(cidade) params.set('cidade', cidade);
+  const inicio = document.getElementById('exp-data-inicio').value;
+  const fim = document.getElementById('exp-data-fim').value;
+  if(inicio || fim){
+    if(inicio) params.set('inicio', inicio);
+    if(fim) params.set('fim', fim);
+  } else {
+    const mes = document.getElementById('exp-mes').value;
+    if(mes) params.set('mes', mes);
+  }
+  const a = document.createElement('a');
+  a.href = '/api/exportar/fotos.zip?' + params.toString();
+  a.download = '';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  toast('Preparando o ZIP com ' + comFoto.length + ' registro(s) com foto — o download começa em instantes.');
+}
+
+// ----------------- Otimizar fotos antigas (criar miniaturas) ----------------
+// Fotos cadastradas antes das miniaturas existirem só têm a versão grande
+// (e as de antes da compressão podem ter vários MB). Aqui o próprio
+// navegador do administrador baixa cada uma, gera a miniatura leve (e, se a
+// foto for muito pesada, uma versão completa comprimida) e manda de volta
+// pro servidor. Só precisa rodar uma vez — as fotos novas já nascem com
+// miniatura.
+function fotosPendentesDeOtimizar(){
+  const pend = [];
+  for(const e of ENTRIES){
+    if(e.fotoAntes && !e.fotoAntesMini) pend.push({ e, campo:'fotoAntes' });
+    if(e.fotoDepois && !e.fotoDepoisMini) pend.push({ e, campo:'fotoDepois' });
+  }
+  return pend;
+}
+
+let otimizandoFotos = false;
+function atualizarAvisoOtimizacao(){
+  const card = document.getElementById('card-otimizar-fotos');
+  if(!card) return;
+  if(!souAdmin()){ card.classList.add('hidden'); return; }
+  const pend = fotosPendentesDeOtimizar();
+  if(pend.length === 0 && !otimizandoFotos){ card.classList.add('hidden'); return; }
+  card.classList.remove('hidden');
+  if(!otimizandoFotos){
+    document.getElementById('otimizar-fotos-texto').innerHTML =
+      'Existem <b>' + pend.length + ' foto(s) antiga(s)</b> sem a versão leve usada no relatório fotográfico — por isso ele demora pra carregar. ' +
+      'Toque no botão abaixo uma única vez (de preferência no computador ou no Wi-Fi) e deixe esta tela aberta até terminar.';
+  }
+}
+
+async function otimizarFotosAntigas(){
+  if(otimizandoFotos) return;
+  const pend = fotosPendentesDeOtimizar();
+  if(pend.length === 0){ atualizarAvisoOtimizacao(); return; }
+  otimizandoFotos = true;
+  const btn = document.getElementById('btn-otimizar-fotos');
+  const prog = document.getElementById('otimizar-fotos-progresso');
+  btn.disabled = true;
+  let ok = 0, falhas = 0;
+  for(let i = 0; i < pend.length; i++){
+    const { e, campo } = pend[i];
+    prog.textContent = 'Otimizando foto ' + (i+1) + ' de ' + pend.length + '... não feche esta tela.';
+    try{
+      const resp = await fetch(e[campo], { credentials:'same-origin' });
+      if(!resp.ok) throw new Error('foto não encontrada');
+      const blob = await resp.blob();
+      const bitmap = await carregarBitmap(blob);
+      const corpo = {};
+      corpo[campo + 'Mini'] = redimensionarBitmap(bitmap, MINI_LADO, MINI_QUALIDADE);
+      // Foto grande demais (de antes da compressão): troca também a
+      // versão completa por uma comprimida, igual as fotos novas.
+      if(blob.size > 900 * 1024 || Math.max(bitmap.width, bitmap.height) > 1600){
+        corpo[campo] = redimensionarBitmap(bitmap, 1600, 0.72);
+      }
+      const atualizado = await api('PUT', '/api/entries/' + encodeURIComponent(e.id) + '/otimizar-fotos', corpo);
+      Object.assign(e, atualizado);
+      ok++;
+    }catch(err){
+      falhas++;
+    }
+  }
+  otimizandoFotos = false;
+  btn.disabled = false;
+  prog.textContent = 'Pronto! ' + ok + ' foto(s) otimizada(s)' + (falhas ? ' — ' + falhas + ' não puderam ser otimizadas (arquivo não encontrado ou corrompido).' : '.');
+  await refreshEntries();
+  atualizarAvisoOtimizacao();
+  if(fotosPendentesDeOtimizar().length === 0) toast('Fotos otimizadas ✓ — o relatório fotográfico agora abre bem mais rápido.');
 }
 
 function csvEscape(v){
@@ -1862,11 +1998,11 @@ function exportarFotos(){
       </div>
       <div class="imgs">
         <figure>
-          ${e.fotoAntes?`<img src="${e.fotoAntes}">`:'<div class="semfoto">Sem foto</div>'}
+          ${e.fotoAntes?`<img src="${fotoParaExibir(e,'fotoAntes')}">`:'<div class="semfoto">Sem foto</div>'}
           <figcaption>ANTES</figcaption>
         </figure>
         <figure>
-          ${e.fotoDepois?`<img src="${e.fotoDepois}">`:'<div class="semfoto">Sem foto</div>'}
+          ${e.fotoDepois?`<img src="${fotoParaExibir(e,'fotoDepois')}">`:'<div class="semfoto">Sem foto</div>'}
           <figcaption>DEPOIS</figcaption>
         </figure>
       </div>
