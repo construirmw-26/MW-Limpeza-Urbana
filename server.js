@@ -177,7 +177,7 @@ const server = http.createServer(async (req, res) => {
 
     // ---- Arquivos enviados (fotos) ----
     if (method === "GET" && urlPath.startsWith("/uploads/")) {
-      if (serveStatic(req, res, UPLOADS_DIR, urlPath.replace("/uploads", ""))) return;
+      if (serveStatic(req, res, UPLOADS_DIR, urlPath.replace("/uploads", ""), { cacheLongo: true })) return;
       res.writeHead(404);
       res.end("Não encontrado");
       return;
