@@ -378,12 +378,21 @@
         <button class="btn btn-primary" onclick="exportarMedicao()">📄 Gerar Medição (imprimir/PDF)</button>
         <button class="btn btn-secondary" onclick="exportarFotos()">🖼 Gerar Relatório Fotográfico (imprimir/PDF)</button>
         <button class="btn btn-outline" onclick="exportarCSV()">⬇ Baixar Planilha (CSV)</button>
+        <button class="btn btn-outline" onclick="baixarFotosZip()">🗂 Baixar Fotos (ZIP)</button>
         <div class="note">
           Os relatórios saem do <b>mesmo registro</b> — a equipe preenche a rua, a medição e as fotos uma única vez em "+ Registro", juntando os lançamentos de todo mundo. A medição, o relatório fotográfico e a planilha são gerados automaticamente a partir disso.<br><br>
           "Gerar Medição" abre pronta, com o mesmo timbrado, tabela completa e resumo por serviço da planilha — use "Imprimir → Salvar como PDF".<br>
           O relatório fotográfico abre com identificação, fotos de antes/depois e campo de assinatura — use "Imprimir → Salvar como PDF".<br>
-          O CSV é útil se você quiser colar os dados na planilha Excel "Medição Mensal".
+          O CSV é útil se você quiser colar os dados na planilha Excel "Medição Mensal".<br>
+          "Baixar Fotos (ZIP)" baixa as fotos originais do filtro escolhido, separadas em pastas por cidade e por data (ex: <i>Leandro Ferreira / 2026-09-22 / Rua X - Varrição - ANTES.jpg</i>).
         </div>
+      </div>
+
+      <div class="card hidden" id="card-otimizar-fotos">
+        <h2>Deixar o relatório fotográfico mais rápido</h2>
+        <div class="note" id="otimizar-fotos-texto"></div>
+        <button class="btn btn-primary" id="btn-otimizar-fotos" onclick="otimizarFotosAntigas()">⚡ Otimizar fotos antigas</button>
+        <div class="note" id="otimizar-fotos-progresso"></div>
       </div>
     </div>
   </main>
