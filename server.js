@@ -1,926 +1,2099 @@
-// Coleta de Campo — servidor (sem dependências externas, só Node puro).
-// Guarda os dados em /data (arquivo JSON + fotos), autentica usuários por
-// usuário/senha com cookie de sessão, e serve o app (public/) + a API.
 "use strict";
-const http = require("http");
-const path = require("path");
-const fs = require("fs");
-const crypto = require("crypto");
+/* Coleta de Campo — lógica do app (versão em nuvem, multiusuário).
+   Antes os dados ficavam só no celular (localStorage); agora tudo passa
+   pela API do servidor, então toda a equipe vê os mesmos registros. */
 
-const { state, persist, persistSync, UPLOADS_DIR } = require("./lib/db");
-const {
-  sendJSON,
-  readJSON,
-  parseCookies,
-  setCookie,
-  clearCookie,
-  serveStatic,
-} = require("./lib/http-helpers");
-const {
-  hashSenha,
-  verificarSenha,
-  criarSessao,
-  destruirSessao,
-  usuarioDaSessao,
-  usuarioPublico,
-  cidadeDoUsuario,
-} = require("./lib/auth");
-const { escreverZip } = require("./lib/zip");
+let CURRENT_USER = null;
+let ENTRIES = [];
+let CIDADES = [];
+let RUAS = []; // ruas da cidade selecionada em "+ Registro" (cadastradas só pelo admin)
+let SERVICOS = []; // serviços cadastrados (aba Serviços) — {id, nome, unidade}
+let METAS = {};
+let CONFIG = {};
+let fotoAntesData = null, fotoDepoisData = null;
+// Miniatura da foto recém-tirada (só existe quando uma foto NOVA foi
+// escolhida no formulário; ao editar sem trocar a foto fica null e o
+// servidor mantém a miniatura que já tinha).
+let fotoAntesMini = null, fotoDepoisMini = null;
+let editandoOriginal = null; // registro que está sendo editado (quando em modo edição)
+let editandoId = null; // id do registro sendo editado, ou null quando é um lançamento novo
 
-const PORT = process.env.PORT || 3000;
-const PUBLIC_DIR = path.join(__dirname, "public");
-const COOKIE_NAME = "cc_session";
+// Unidade de medida de um serviço pelo nome (usada em "+ Registro" e nas
+// Metas). "R$" é tratado como custo fixo mensal (mostra só o campo Valor);
+// qualquer outra unidade usa o formulário de extensão/largura/lados.
+function unidadeDoServico(nome){
+  const s = SERVICOS.find(s=>s.nome===nome);
+  return s ? s.unidade : '';
+}
+// Valor cobrado por unidade de medida (R$/m², R$/m, R$/ha) cadastrado na aba
+// Serviços — usado para calcular o valor final de cada lançamento e o total
+// de cada serviço no relatório de Medição. Não se aplica a serviços "R$"
+// (custo fixo mensal), que já têm o valor digitado direto no registro.
+// Cada cidade tem seu próprio contrato, então cada cidade tem seu próprio
+// valor pra esse serviço — não existe mais um "valor padrão" geral: se a
+// cidade não tiver um valor específico cadastrado, o valor é 0 (na prática
+// o serviço nem deveria aparecer pra lançar registro nessa cidade — ver
+// servicoDisponivelNaCidade()).
+function valorUnitarioDoServico(nome, cidadeNome){
+  const s = SERVICOS.find(s=>s.nome===nome);
+  if(!s) return 0;
+  const cidadeObj = cidadeNome ? CIDADES.find(c=>c.nome===cidadeNome) : null;
+  if(cidadeObj && s.precosPorCidade && s.precosPorCidade[cidadeObj.id] !== undefined && s.precosPorCidade[cidadeObj.id] !== null && s.precosPorCidade[cidadeObj.id] !== ''){
+    return parseFloat(s.precosPorCidade[cidadeObj.id]) || 0;
+  }
+  return 0;
+}
 
-// ---- Cria o primeiro usuário administrador se ainda não existir nenhum ----
-function bootstrapAdmin() {
-  if (state.users.length > 0) return;
-  const usuario = process.env.ADMIN_USER || "admin";
-  const senha = process.env.ADMIN_PASSWORD || crypto.randomBytes(6).toString("hex");
-  const nome = process.env.ADMIN_NOME || "Administrador";
-  state.users.push({
-    id: crypto.randomUUID(),
-    nome,
-    usuario,
-    senha: hashSenha(senha),
-    role: "admin",
-    criadoEm: new Date().toISOString(),
+// Um serviço só "existe" numa cidade quando o administrador cadastrou um
+// valor específico pra ela na aba Serviços — algumas cidades não têm todos
+// os serviços (contratos diferentes), então o serviço fica escondido nas
+// cidades onde ele não tem valor cadastrado. Pra quem não é admin, o
+// servidor não manda os valores (são sensíveis), só a lista de cidades
+// onde o serviço tem valor cadastrado (cidadesDisponiveis) — dá pra saber
+// se o serviço "existe" ali sem saber quanto custa.
+function servicoDisponivelNaCidade(nomeServico, cidadeId){
+  if(!cidadeId) return false;
+  const s = SERVICOS.find(s=>s.nome===nomeServico);
+  if(!s) return false;
+  if(s.precosPorCidade){
+    const v = s.precosPorCidade[cidadeId];
+    return v !== undefined && v !== null && v !== '';
+  }
+  if(s.cidadesDisponiveis) return s.cidadesDisponiveis.includes(cidadeId);
+  return false;
+}
+
+// Id da cidade selecionada agora em "+ Registro" (admin escolhe pelo nome;
+// encarregado já tem a cidade fixa, sem precisar olhar CIDADES que pra ele
+// nem vem carregada).
+function cidadeIdAtualForm(){
+  const nomeCidade = document.getElementById('f-cidade').value;
+  if(!nomeCidade) return null;
+  if(souAdmin()){
+    const c = CIDADES.find(c=>c.nome === nomeCidade);
+    return c ? c.id : null;
+  }
+  return (CURRENT_USER && CURRENT_USER.cidadeId) || null;
+}
+// Um registro já salvo guarda sua própria unidade (denormalizada no momento
+// da criação); registros antigos (antes dessa mudança) não têm esse campo,
+// então caímos de volta na regra antiga (só "Equipe Padrão" era valor fixo).
+function entryIsValorFixo(e){
+  return (e.unidade || (e.servico === 'Equipe Padrão' ? 'R$' : 'm²')) === 'R$';
+}
+
+// ------------------------------- API ---------------------------------
+async function api(method, path, body){
+  const opts = { method, headers: {}, credentials: 'same-origin' };
+  if(body !== undefined){
+    opts.headers['Content-Type'] = 'application/json';
+    opts.body = JSON.stringify(body);
+  }
+  const res = await fetch(path, opts);
+  let data = null;
+  try { data = await res.json(); } catch(e){ /* sem corpo */ }
+  if(!res.ok){
+    const msg = (data && data.erro) ? data.erro : ('Erro ' + res.status);
+    const err = new Error(msg);
+    err.status = res.status;
+    throw err;
+  }
+  return data;
+}
+
+function hoje(){ return new Date().toISOString().slice(0,10); }
+
+// Monta "Rua X, nº 123 - Bairro" a partir dos campos denormalizados no
+// registro (vindos da rua cadastrada no momento em que o registro foi criado).
+// Serviço "R$" (ajuda de custo mensal) não tem rua — mostra um rótulo fixo
+// em vez de deixar em branco, pra não parecer que faltou preencher algo.
+function enderecoCompleto(e){
+  if(!e.rua && entryIsValorFixo(e)) return 'Ajuda de custo mensal (sem local)';
+  let s = e.rua || '';
+  if(e.numero) s += ', nº ' + e.numero;
+  if(e.bairro) s += ' - ' + e.bairro;
+  return s;
+}
+
+function toast(msg){
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  setTimeout(()=>t.classList.remove('show'), 1800);
+}
+
+// Modal de confirmação próprio (não depende de window.confirm, que em
+// alguns navegadores de celular/apps não funciona direito).
+function confirmarAcao(msg, onConfirm){
+  document.getElementById('modal-msg').textContent = msg;
+  document.getElementById('modal-overlay').classList.remove('hidden');
+  const btnConfirm = document.getElementById('modal-confirm');
+  const btnCancel = document.getElementById('modal-cancel');
+  function fechar(){
+    document.getElementById('modal-overlay').classList.add('hidden');
+    btnConfirm.removeEventListener('click', onOk);
+    btnCancel.removeEventListener('click', onCancel);
+  }
+  function onOk(){ fechar(); onConfirm(); }
+  function onCancel(){ fechar(); }
+  btnConfirm.addEventListener('click', onOk);
+  btnCancel.addEventListener('click', onCancel);
+}
+
+// ------------------------------ Login ----------------------------------
+async function checarSessao(){
+  try{
+    CURRENT_USER = await api('GET', '/api/me');
+    await entrarNoApp();
+  }catch(e){
+    document.getElementById('login-screen').classList.remove('hidden');
+    document.getElementById('app-root').classList.add('hidden');
+  }
+}
+
+async function fazerLogin(){
+  const usuario = document.getElementById('login-usuario').value.trim();
+  const senha = document.getElementById('login-senha').value;
+  const erroEl = document.getElementById('login-erro');
+  erroEl.textContent = '';
+  if(!usuario || !senha){ erroEl.textContent = 'Preencha usuário e senha.'; return; }
+  const btn = document.getElementById('login-btn');
+  btn.disabled = true; btn.textContent = 'Entrando...';
+  try{
+    CURRENT_USER = await api('POST', '/api/login', { usuario, senha });
+    document.getElementById('login-senha').value = '';
+    await entrarNoApp();
+  }catch(e){
+    erroEl.textContent = e.message || 'Não foi possível entrar.';
+  }finally{
+    btn.disabled = false; btn.textContent = 'Entrar';
+  }
+}
+
+async function fazerLogout(){
+  try{ await api('POST', '/api/logout'); }catch(e){}
+  CURRENT_USER = null;
+  document.getElementById('app-root').classList.add('hidden');
+  document.getElementById('login-screen').classList.remove('hidden');
+}
+
+function souAdmin(){ return CURRENT_USER && CURRENT_USER.role === 'admin'; }
+
+async function entrarNoApp(){
+  document.getElementById('login-screen').classList.add('hidden');
+  document.getElementById('app-root').classList.remove('hidden');
+  document.getElementById('quem-nome').textContent = 'Olá, ' + CURRENT_USER.nome;
+  document.getElementById('tab-usuarios').classList.toggle('hidden', !souAdmin());
+  document.getElementById('tab-cidades').classList.toggle('hidden', !souAdmin());
+  document.getElementById('tab-servicos').classList.toggle('hidden', !souAdmin());
+  // Exportar (relatórios de Medição/Fotos) mostra valores de cobrança —
+  // só o administrador tem acesso.
+  document.getElementById('tab-exportar').classList.toggle('hidden', !souAdmin());
+  document.getElementById('nota-add-cidade').classList.toggle('hidden', !souAdmin());
+  document.getElementById('f-data').value = hoje();
+  await refreshConfig();
+  // Identificação da empresa: só o administrador edita.
+  ['cfg-empresa','cfg-cnpj','cfg-contrato'].forEach(id=>{
+    document.getElementById(id).readOnly = !souAdmin();
   });
-  persist();
-  console.log("========================================================");
-  console.log("Nenhum usuário existia — criei o administrador inicial:");
-  console.log("  usuário:", usuario);
-  if (!process.env.ADMIN_PASSWORD) {
-    console.log("  senha  :", senha, "(gerada automaticamente — troque depois de logar)");
+  if(souAdmin()){
+    await refreshCidades();
+  }
+  await refreshServicos(); // todo mundo escolhe serviço em "+ Registro", não só o admin
+  popularSelectCidade();
+  popularSelectServico();
+  renderLista();
+}
+
+// ------------------------------ Dados ------------------------------------
+async function refreshEntries(){ ENTRIES = await api('GET', '/api/entries'); }
+async function refreshCidades(){ CIDADES = await api('GET', '/api/cidades'); }
+async function refreshServicos(){ SERVICOS = await api('GET', '/api/servicos'); }
+async function refreshConfig(){
+  CONFIG = await api('GET', '/api/config');
+  document.getElementById('cfg-empresa').value = CONFIG.empresa || '';
+  document.getElementById('cfg-cnpj').value = CONFIG.cnpj || '';
+  document.getElementById('cfg-contrato').value = CONFIG.contrato || '';
+}
+
+// Administrador escolhe a cidade em cada registro; encarregado só tem a
+// própria cidade (fixa, atribuída pelo administrador na aba Usuários).
+function popularSelectCidade(){
+  const sel = document.getElementById('f-cidade');
+  const aviso = document.getElementById('sem-cidade-aviso');
+  if(souAdmin()){
+    const atual = sel.value;
+    const nomes = CIDADES.map(c=>c.nome);
+    sel.innerHTML = '<option value="">Selecione a cidade...</option>' + nomes.map(n=>`<option value="${n}">${n}</option>`).join('');
+    if(nomes.includes(atual)) sel.value = atual;
+    sel.disabled = false;
+    aviso.classList.add('hidden');
+  } else if(CURRENT_USER.cidadeNome){
+    sel.innerHTML = `<option value="${CURRENT_USER.cidadeNome}">${CURRENT_USER.cidadeNome}</option>`;
+    sel.value = CURRENT_USER.cidadeNome;
+    sel.disabled = true;
+    aviso.classList.add('hidden');
   } else {
-    console.log("  senha  : (definida pela variável de ambiente ADMIN_PASSWORD)");
+    sel.innerHTML = '<option value="">Nenhuma cidade atribuída</option>';
+    sel.disabled = true;
+    aviso.classList.remove('hidden');
   }
-  console.log("========================================================");
+  atualizarBotaoSalvar();
+  atualizarRuasPelaCidade();
 }
-bootstrapAdmin();
 
-// ---- Converte cidades salvas no formato antigo (texto simples) para o
-// formato novo (objeto com contrato/responsável/telefone/documentos), e
-// garante que cidades já no formato novo tenham a lista de documentos ----
-function bootstrapCidades() {
-  let mudou = false;
-  state.cidades = state.cidades.map((c) => {
-    if (typeof c === "string") {
-      mudou = true;
-      return { id: crypto.randomUUID(), nome: c, contrato: "", responsavel: "", telefone: "", documentos: [] };
+let ultimoEquipeSugerida = ''; // último valor preenchido automaticamente, para não sobrescrever o que a pessoa digitou
+
+// Cada cidade já tem um "Responsável / encarregado fixo" cadastrado na aba
+// Cidades — ao escolher a cidade em "+ Registro", sugerimos esse nome no
+// campo "Equipe / Encarregado" sozinho, sem precisar digitar de novo. Se a
+// pessoa alterar o campo manualmente, a sugestão não mexe mais nele.
+function sugerirEquipe(){
+  const nomeCidade = document.getElementById('f-cidade').value;
+  let responsavel = '';
+  if(nomeCidade){
+    if(souAdmin()){
+      const c = CIDADES.find(c=>c.nome === nomeCidade);
+      responsavel = (c && c.responsavel) ? c.responsavel : '';
+    } else {
+      responsavel = CURRENT_USER.cidadeResponsavel || '';
     }
-    if (!Array.isArray(c.documentos)) {
-      mudou = true;
-      c.documentos = [];
-    }
-    return c;
+  }
+  const campo = document.getElementById('f-equipe');
+  if(campo.value.trim() === '' || campo.value === ultimoEquipeSugerida){
+    campo.value = responsavel;
+    ultimoEquipeSugerida = responsavel;
+  }
+}
+
+// A rua é sempre escolhida de uma lista já cadastrada pelo administrador
+// (aba Cidades) — nunca digitada livremente, para manter os endereços
+// padronizados. Aqui buscamos as ruas da cidade selecionada no formulário.
+async function atualizarRuasPelaCidade(){
+  sugerirEquipe();
+  const nomeCidade = document.getElementById('f-cidade').value;
+  if(!nomeCidade){
+    RUAS = [];
+    popularSelectRua();
+    popularSelectServico(); // cidade limpa: lista de serviços some (cada cidade tem os seus)
+    return;
+  }
+  let cidadeId = null;
+  if(souAdmin()){
+    const c = CIDADES.find(c=>c.nome === nomeCidade);
+    cidadeId = c ? c.id : null;
+  } else {
+    cidadeId = CURRENT_USER.cidadeId || null;
+  }
+  try{
+    RUAS = cidadeId ? await api('GET', '/api/ruas?cidadeId=' + encodeURIComponent(cidadeId)) : [];
+  }catch(e){
+    RUAS = [];
+  }
+  popularSelectRua();
+  popularSelectServico(); // recarrega os serviços disponíveis pra cidade escolhida
+}
+
+function popularSelectRua(){
+  const selCidade = document.getElementById('f-cidade');
+  const sel = document.getElementById('f-rua');
+  const aviso = document.getElementById('sem-rua-aviso');
+  if(!selCidade.value){
+    sel.innerHTML = '<option value="">Selecione a cidade primeiro...</option>';
+    sel.disabled = true;
+    aviso.classList.add('hidden');
+  } else if(RUAS.length === 0){
+    sel.innerHTML = '<option value="">Nenhuma rua cadastrada</option>';
+    sel.disabled = true;
+    aviso.classList.remove('hidden');
+  } else {
+    const atual = sel.value;
+    sel.innerHTML = '<option value="">Selecione a rua...</option>' + RUAS.map(r=>`<option value="${r.id}">${r.nome}${r.bairro ? ' - ' + r.bairro : ''}</option>`).join('');
+    if(RUAS.some(r=>r.id===atual)) sel.value = atual;
+    sel.disabled = false;
+    aviso.classList.add('hidden');
+  }
+  atualizarBotaoSalvar();
+}
+
+// Serviços "R$" (custo mensal fixo, tipo "Equipe Padrão") são ajuda de
+// custo lançada só pelo administrador — não aparecem pra encarregado
+// escolher, nem no "+ Registro" principal nem nas linhas extras. Além
+// disso, cada cidade só mostra os serviços que têm valor cadastrado pra
+// ela (ver servicoDisponivelNaCidade) — sem cidade escolhida ainda, não
+// dá pra saber quais serviços ela tem, então a lista fica vazia.
+function servicosDisponiveisParaLancar(){
+  const porPermissao = souAdmin() ? SERVICOS : SERVICOS.filter(s=>s.unidade !== 'R$');
+  const cidadeId = cidadeIdAtualForm();
+  if(!cidadeId) return [];
+  return porPermissao.filter(s=>servicoDisponivelNaCidade(s.nome, cidadeId));
+}
+
+function popularSelectServico(){
+  const sel = document.getElementById('f-servico');
+  const aviso = document.getElementById('sem-servico-aviso');
+  const cidadeEscolhida = !!document.getElementById('f-cidade').value;
+  const disponiveis = servicosDisponiveisParaLancar();
+  const atual = sel.value;
+  // Editando um registro antigo cujo serviço não tem mais valor cadastrado
+  // nessa cidade: mantemos ele na lista pra não travar a edição, só não
+  // deixamos escolher esse serviço num lançamento novo.
+  const extra = (editandoId && atual && !disponiveis.some(s=>s.nome===atual)) ? SERVICOS.find(s=>s.nome===atual) : null;
+  const lista = extra ? [...disponiveis, extra] : disponiveis;
+  if(lista.length === 0){
+    sel.innerHTML = '<option value="">Nenhum serviço cadastrado</option>';
+    sel.disabled = true;
+    aviso.textContent = cidadeEscolhida
+      ? 'Essa cidade ainda não tem nenhum serviço com valor cadastrado — peça ao administrador para cadastrar o valor na aba "Serviços".'
+      : 'Escolha a cidade primeiro para ver os serviços cadastrados nela.';
+    aviso.classList.remove('hidden');
+  } else {
+    sel.innerHTML = '<option value="">Selecione...</option>' + lista.map(s=>`<option value="${s.nome}">${s.nome}</option>`).join('');
+    if(lista.some(s=>s.nome===atual)) sel.value = atual;
+    sel.disabled = false;
+    aviso.classList.add('hidden');
+  }
+  atualizarBotaoSalvar();
+  toggleServicoFields();
+}
+
+function atualizarBotaoSalvar(){
+  const btn = document.getElementById('btn-salvar');
+  const semCidade = !document.getElementById('sem-cidade-aviso').classList.contains('hidden');
+  // Serviço "R$" (ajuda de custo mensal) não precisa de rua cadastrada —
+  // não trava o botão de salvar só por causa da rua nesse caso.
+  const isValorFixo = unidadeDoServico(document.getElementById('f-servico').value) === 'R$';
+  const semRua = !isValorFixo && !document.getElementById('sem-rua-aviso').classList.contains('hidden');
+  const semServico = !document.getElementById('sem-servico-aviso').classList.contains('hidden');
+  btn.disabled = semCidade || semRua || semServico;
+}
+
+// ------------------------------- Tabs ------------------------------------
+document.addEventListener('DOMContentLoaded', ()=>{
+  document.querySelectorAll('.tab').forEach(tab=>{
+    tab.addEventListener('click', async ()=>{
+      document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
+      document.querySelectorAll('.view').forEach(v=>v.classList.remove('active'));
+      tab.classList.add('active');
+      document.getElementById('view-'+tab.dataset.tab).classList.add('active');
+      if(tab.dataset.tab === 'lista') await renderLista();
+      if(tab.dataset.tab === 'metas') await renderMetas();
+      if(tab.dataset.tab === 'cidades' && souAdmin()) await renderCidades();
+      if(tab.dataset.tab === 'servicos' && souAdmin()) await renderServicos();
+      if(tab.dataset.tab === 'usuarios' && souAdmin()) await renderUsuarios();
+      if(tab.dataset.tab === 'exportar') await renderFiltrosExport();
+    });
   });
-  if (mudou) persist();
-}
-bootstrapCidades();
 
-// ---- Migra metas antigas (um valor global por serviço) para o novo
-// formato (um conjunto de metas por cidade — já que cada cidade agora
-// pode ter uma meta diferente para o mesmo serviço). Só roda uma vez: se
-// o formato já é o novo (valores são objetos, não números), não mexe. ----
-function bootstrapMetas() {
-  const chaves = Object.keys(state.metas || {});
-  const formatoAntigo = chaves.some((k) => typeof state.metas[k] === "number");
-  if (!formatoAntigo) return;
-  const antigas = state.metas;
-  state.metas = {};
-  for (const c of state.cidades) {
-    state.metas[c.nome] = { ...antigas };
+  setupPhotoInput('f-antes','preview-antes', (v, mini)=>{ fotoAntesData=v; fotoAntesMini=mini; });
+  setupPhotoInput('f-depois','preview-depois', (v, mini)=>{ fotoDepoisData=v; fotoDepoisMini=mini; });
+
+  checarSessao();
+});
+
+// ---------------------- Fotos (captura no celular) ------------------------
+// A câmera do celular tira fotos de vários MB — guardar isso puro no
+// registro deixa o banco de dados enorme (cada foto vira um texto gigante
+// no JSON) e é por isso que o app e o relatório fotográfico ficavam lentos
+// mesmo com poucas fotos. Antes de guardar, redimensionamos a foto pra no
+// máximo 1600px no lado maior e comprimimos como JPEG — fica leve (uns
+// 100-300 KB em vez de vários MB) sem perder qualidade visível num
+// relatório impresso/PDF.
+async function carregarBitmap(file){
+  let bitmap;
+  try{
+    // 'from-image' já aplica a rotação certa (fotos tiradas na vertical no
+    // celular vêm com essa informação separada do pixel em si — sem isso
+    // elas apareceriam deitadas no relatório).
+    bitmap = await createImageBitmap(file, { imageOrientation: 'from-image' });
+  }catch(e){
+    // Navegador sem suporte a createImageBitmap com orientação — cai pra um
+    // jeito mais simples (funciona, só pode sair sem a rotação certa em
+    // fotos tiradas na vertical).
+    bitmap = await new Promise((resolve, reject)=>{
+      const img = new Image();
+      img.onload = ()=>resolve(img);
+      img.onerror = ()=>reject(new Error('Não consegui abrir essa imagem.'));
+      img.src = URL.createObjectURL(file);
+    });
   }
-  persist();
-}
-bootstrapMetas();
-
-// ---------------------------- Helpers de rota ------------------------------
-function getAuthUser(req) {
-  const cookies = parseCookies(req);
-  return usuarioDaSessao(cookies[COOKIE_NAME]);
+  return bitmap;
 }
 
-function requireAuth(req, res) {
-  const user = getAuthUser(req);
-  if (!user) {
-    sendJSON(res, 401, { erro: "Não autenticado" });
-    return null;
-  }
-  return user;
+function redimensionarBitmap(bitmap, maxLado, qualidade){
+  const largura = bitmap.width, altura = bitmap.height;
+  const escala = Math.min(1, maxLado / Math.max(largura, altura));
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Math.round(largura * escala));
+  canvas.height = Math.max(1, Math.round(altura * escala));
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+  return canvas.toDataURL('image/jpeg', qualidade);
 }
 
-function requireAdmin(req, res) {
-  const user = requireAuth(req, res);
-  if (!user) return null;
-  if (user.role !== "admin") {
-    sendJSON(res, 403, { erro: "Somente administradores" });
-    return null;
-  }
-  return user;
+async function comprimirFoto(file, maxLado, qualidade){
+  return redimensionarBitmap(await carregarBitmap(file), maxLado, qualidade);
 }
 
-// Salva uma foto em base64 (data URL) em /data/uploads e devolve a URL pública.
-function salvarFotoBase64(dataUrl) {
-  if (!dataUrl || typeof dataUrl !== "string" || !dataUrl.startsWith("data:")) return null;
-  const match = dataUrl.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/);
-  if (!match) return null;
-  const mime = match[1];
-  const ext = mime === "image/png" ? "png" : mime === "image/webp" ? "webp" : "jpg";
-  const buf = Buffer.from(match[2], "base64");
-  const nome = crypto.randomBytes(16).toString("hex") + "." + ext;
-  fs.writeFileSync(path.join(UPLOADS_DIR, nome), buf);
-  return "/uploads/" + nome;
-}
-
-// Igual à de cima, mas também aceita PDF (para contratos/aditivos anexados).
-function salvarArquivoBase64(dataUrl) {
-  if (!dataUrl || typeof dataUrl !== "string" || !dataUrl.startsWith("data:")) return null;
-  const match = dataUrl.match(/^data:([a-zA-Z0-9.+-]+\/[a-zA-Z0-9.+-]+);base64,(.+)$/);
-  if (!match) return null;
-  const mime = match[1];
-  const extPorMime = {
-    "application/pdf": "pdf",
-    "image/png": "png",
-    "image/webp": "webp",
-    "image/jpeg": "jpg",
+// Cada foto é guardada em DUAS versões: a "completa" (até 1600px, pra
+// quem precisar da foto em boa resolução — ZIP, abrir a foto sozinha) e uma
+// "miniatura" bem leve (até 800px, umas dezenas de KB) que é a usada na
+// lista de registros e no relatório fotográfico. No relatório a foto
+// aparece num quadrinho pequeno — não precisa baixar a versão grande pra
+// isso, e com a miniatura ele abre muito mais rápido.
+const MINI_LADO = 800, MINI_QUALIDADE = 0.65;
+async function gerarVersoesFoto(file){
+  const bitmap = await carregarBitmap(file);
+  return {
+    completa: redimensionarBitmap(bitmap, 1600, 0.72),
+    mini: redimensionarBitmap(bitmap, MINI_LADO, MINI_QUALIDADE),
   };
-  const ext = extPorMime[mime];
-  if (!ext) return null; // tipo de arquivo não suportado
-  const buf = Buffer.from(match[2], "base64");
-  const nome = crypto.randomBytes(16).toString("hex") + "." + ext;
-  fs.writeFileSync(path.join(UPLOADS_DIR, nome), buf);
-  return "/uploads/" + nome;
 }
 
-function removerFotoSeForUpload(url) {
-  if (!url || typeof url !== "string" || !url.startsWith("/uploads/")) return;
-  const full = path.join(UPLOADS_DIR, path.basename(url));
-  fs.unlink(full, () => {});
+// Qual versão mostrar numa tela/relatório: a miniatura se existir (fotos
+// novas e fotos antigas já otimizadas), senão a completa.
+function fotoParaExibir(e, campo){
+  return e[campo + 'Mini'] || e[campo] || null;
 }
 
-// ------------------------------- Servidor -----------------------------------
-const server = http.createServer(async (req, res) => {
-  try {
-    const urlPath = req.url.split("?")[0];
-    const method = req.method;
+function setupPhotoInput(inputId, previewId, setter){
+  const input = document.getElementById(inputId);
+  input.addEventListener('change', async ()=>{
+    const file = input.files[0];
+    if(!file) return;
+    document.getElementById(previewId).innerHTML = '<span>Processando foto...</span>';
+    try{
+      const v = await gerarVersoesFoto(file);
+      setter(v.completa, v.mini);
+      document.getElementById(previewId).innerHTML = '<img src="'+v.mini+'">';
+    }catch(e){
+      toast('Não consegui processar essa foto — tenta tirar de novo ou escolher outra.');
+      document.getElementById(previewId).innerHTML = '<span>⚠️ Falha ao carregar</span>';
+      input.value = '';
+    }
+  });
+}
 
-    // ---- Verificação de saúde (pro Coolify checar se o app está
-    // respondendo de verdade, não só se o processo está de pé). Não exige
-    // login nem toca no banco — só confirma que o servidor está atendendo
-    // pedidos rapidamente. Fica logo no início de tudo, antes de qualquer
-    // outra rota, pra responder o mais rápido possível. ----
-    if (method === "GET" && urlPath === "/api/status") {
-      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
-      res.end(JSON.stringify({ ok: true }));
+// Serviços com unidade "R$" (cadastrados na aba Serviços) são custo mensal
+// de valor fixo, não medida por extensão/largura/lados — o formulário troca
+// um grupo de campos pelo outro. Serviços em "m" (comprimento linear, como
+// meio-fio) não usam largura — só extensão × lados.
+// Versão genérica de toggleServicoFields, reaproveitada tanto no serviço
+// principal ("f-...") quanto em cada linha extra de "+ Outro serviço nesta
+// mesma rua" (prefixo "se<seq>-...").
+function toggleServicoFieldsGeneric(idServico, idGrpMedidas, idGrpValor, idGrpLargura){
+  const servico = document.getElementById(idServico).value;
+  const unidade = unidadeDoServico(servico);
+  const isValorFixo = unidade === 'R$';
+  const isLinear = unidade === 'm';
+  document.getElementById(idGrpMedidas).style.display = isValorFixo ? 'none' : '';
+  document.getElementById(idGrpValor).style.display = isValorFixo ? '' : 'none';
+  document.getElementById(idGrpLargura).style.display = isLinear ? 'none' : '';
+  // Serviços "R$" têm um valor mensal padrão cadastrado na aba Serviços (pode
+  // variar por cidade) — pré-preenche o campo Valor ao escolher o serviço
+  // usando o valor da cidade já selecionada (só quando ainda está vazio, pra
+  // não sobrescrever o que a pessoa já digitou; num registro em edição,
+  // editarRegistro() preenche o valor real logo depois desta chamada, então
+  // o padrão aqui não atrapalha).
+  if(isValorFixo){
+    const valorInput = document.getElementById(idServico.replace('-servico','-valor'));
+    if(valorInput && !valorInput.value){
+      const cidadeAtual = document.getElementById('f-cidade').value;
+      const padrao = valorUnitarioDoServico(servico, cidadeAtual);
+      if(padrao) valorInput.value = padrao;
+    }
+  }
+}
+
+function toggleServicoFields(){
+  toggleServicoFieldsGeneric('f-servico','grp-medidas','grp-valor','grp-largura');
+  // Serviço "R$" (custo mensal fixo, tipo "Equipe Padrão") é uma ajuda de
+  // custo da cidade — não tem local físico nem foto, então esses campos
+  // ficam escondidos (o valor continua opcional de editar, só não é
+  // obrigatório preencher rua/foto — ver salvarRegistro()).
+  const servico = document.getElementById('f-servico').value;
+  const isValorFixo = unidadeDoServico(servico) === 'R$';
+  document.getElementById('grp-rua').style.display = isValorFixo ? 'none' : '';
+  document.getElementById('grp-fotos').style.display = isValorFixo ? 'none' : '';
+  document.getElementById('btn-add-servico').classList.toggle('hidden', isValorFixo);
+  atualizarBotaoSalvar();
+}
+
+// --------------------- Vários serviços na mesma rua -----------------------
+// Às vezes a equipe executa mais de um serviço na mesma rua e tira a mesma
+// foto de antes/depois pros dois (ex: capina + roçada). Em vez de obrigar a
+// pessoa a preencher rua/data/fotos de novo pra cada serviço, deixamos
+// adicionar "linhas" extras de serviço no mesmo formulário — ao salvar, cada
+// linha vira um registro separado (mesma rua/data/equipe/obs/fotos), sem
+// mudar como os registros já existentes funcionam (relatórios, metas etc.
+// continuam vendo um serviço por registro, igual sempre foi).
+let extrasServico = []; // sequenciais das linhas extras atualmente na tela
+
+function linhaServicoHTML(seq){
+  const opts = '<option value="">Selecione...</option>' + servicosDisponiveisParaLancar().map(s=>`<option value="${s.nome}">${s.nome}</option>`).join('');
+  return `
+    <div class="card servico-extra" id="se${seq}-card" style="margin-top:10px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;">
+        <h2 style="margin:0;">Outro serviço nesta mesma rua</h2>
+        <button type="button" class="btn btn-outline" style="width:auto;margin:0;padding:6px 12px;font-size:12.5px;" onclick="removerLinhaServico(${seq})">Remover</button>
+      </div>
+      <label>Serviço Executado</label>
+      <select id="se${seq}-servico" onchange="toggleServicoFieldsGeneric('se${seq}-servico','se${seq}-grp-medidas','se${seq}-grp-valor','se${seq}-grp-largura')">${opts}</select>
+      <div id="se${seq}-grp-medidas">
+        <div class="row2">
+          <div>
+            <label>Extensão (m)</label>
+            <input type="number" id="se${seq}-extensao" placeholder="Ex: 350" min="0" step="1">
+          </div>
+          <div id="se${seq}-grp-largura">
+            <label>Largura (m)</label>
+            <input type="number" id="se${seq}-largura" placeholder="Ex: 2" min="0" step="0.1">
+          </div>
+        </div>
+        <label>Lados executados</label>
+        <input type="number" id="se${seq}-lados" min="1" step="1" value="1" placeholder="Ex: 1">
+      </div>
+      <div id="se${seq}-grp-valor" style="display:none;">
+        <label>Valor (R$) — custo mensal fixo da cidade</label>
+        <input type="number" id="se${seq}-valor" placeholder="Ex: 1500.00" min="0" step="0.01">
+      </div>
+    </div>`;
+}
+
+let proximoSeqServico = 1;
+function adicionarLinhaServico(){
+  const seq = proximoSeqServico++;
+  extrasServico.push(seq);
+  document.getElementById('servicos-extra').insertAdjacentHTML('beforeend', linhaServicoHTML(seq));
+}
+
+function removerLinhaServico(seq){
+  extrasServico = extrasServico.filter(s=>s!==seq);
+  const el = document.getElementById('se'+seq+'-card');
+  if(el) el.remove();
+}
+
+function limparLinhasServico(){
+  document.getElementById('servicos-extra').innerHTML = '';
+  extrasServico = [];
+}
+
+// Lê os valores de uma "linha" de serviço (a principal, prefixo "f", ou uma
+// extra, prefixo "se<seq>") já considerando a unidade do serviço escolhido
+// (esconde extensão/largura/lados quando é valor fixo, esconde largura
+// quando é medida só em comprimento).
+function lerLinhaServico(prefix){
+  const servico = document.getElementById(prefix+'-servico').value;
+  const unidade = unidadeDoServico(servico);
+  const isValorFixo = unidade === 'R$';
+  const isLinear = unidade === 'm';
+  return {
+    servico,
+    extensao: isValorFixo ? '' : document.getElementById(prefix+'-extensao').value,
+    largura: (isValorFixo || isLinear) ? '' : document.getElementById(prefix+'-largura').value,
+    lados: isValorFixo ? '' : (document.getElementById(prefix+'-lados').value || '1'),
+    valor: isValorFixo ? document.getElementById(prefix+'-valor').value : '',
+  };
+}
+
+function resetForm(){
+  ['f-extensao','f-largura','f-valor','f-equipe','f-obs'].forEach(id=>document.getElementById(id).value='');
+  document.getElementById('f-cidade').value='';
+  document.getElementById('f-servico').value='';
+  document.getElementById('f-lados').value='1';
+  document.getElementById('f-data').value = hoje();
+  fotoAntesData = null; fotoDepoisData = null;
+  fotoAntesMini = null; fotoDepoisMini = null;
+  document.getElementById('preview-antes').innerHTML = '<span>📷 Antes</span>';
+  document.getElementById('preview-depois').innerHTML = '<span>📷 Depois</span>';
+  document.getElementById('f-antes').value = '';
+  document.getElementById('f-depois').value = '';
+  toggleServicoFields();
+  popularSelectCidade(); // repõe a cidade (fixa p/ encarregado) e já recarrega as ruas dela
+  limparLinhasServico();
+  sairDoModoEdicao();
+}
+
+// ---------------------------- Editar registro -----------------------------
+// Ativa o "modo edição": abre a aba "+ Registro" já preenchida com os dados
+// do registro escolhido na lista. Salvar Registro passa a enviar PUT em vez
+// de POST; Cancelar (ou salvar com sucesso) volta ao modo de lançar novo.
+async function editarRegistro(id){
+  const e = ENTRIES.find(x=>x.id===id);
+  if(!e) return;
+  editandoId = id;
+
+  // Ativa a aba "+ Registro" (sem passar pelo listener genérico das abas).
+  document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
+  document.querySelectorAll('.view').forEach(v=>v.classList.remove('active'));
+  document.querySelector('.tab[data-tab="novo"]').classList.add('active');
+  document.getElementById('view-novo').classList.add('active');
+
+  if(souAdmin()) document.getElementById('f-cidade').value = e.cidade;
+  await atualizarRuasPelaCidade(); // recarrega as ruas da cidade certa antes de escolher a rua
+  document.getElementById('f-rua').value = e.ruaId || '';
+
+  document.getElementById('f-servico').value = e.servico || '';
+  toggleServicoFields();
+
+  document.getElementById('f-extensao').value = e.extensao || '';
+  document.getElementById('f-largura').value = e.largura || '';
+  document.getElementById('f-lados').value = e.lados || '1';
+  document.getElementById('f-valor').value = e.valor || '';
+  document.getElementById('f-equipe').value = e.equipe || '';
+  document.getElementById('f-data').value = e.data || hoje();
+  document.getElementById('f-obs').value = e.obs || '';
+
+  fotoAntesData = e.fotoAntes || null;
+  fotoDepoisData = e.fotoDepois || null;
+  fotoAntesMini = null; fotoDepoisMini = null;
+  document.getElementById('preview-antes').innerHTML = fotoAntesData ? `<img src="${fotoParaExibir(e,'fotoAntes')}">` : '<span>📷 Antes</span>';
+  document.getElementById('preview-depois').innerHTML = fotoDepoisData ? `<img src="${fotoParaExibir(e,'fotoDepois')}">` : '<span>📷 Depois</span>';
+  document.getElementById('f-antes').value = '';
+  document.getElementById('f-depois').value = '';
+
+  // Na edição também dá pra usar "+ Outro serviço nesta mesma rua": o
+  // registro original é atualizado e cada serviço extra vira um registro
+  // NOVO com a mesma rua, data, equipe, observações e fotos.
+  limparLinhasServico();
+  editandoOriginal = e;
+  entrarNoModoEdicao();
+  window.scrollTo({top:0, behavior:'smooth'});
+}
+
+function entrarNoModoEdicao(){
+  document.getElementById('aviso-editando').classList.remove('hidden');
+  document.getElementById('btn-salvar').textContent = 'Salvar Alterações';
+}
+
+function sairDoModoEdicao(){
+  editandoId = null;
+  editandoOriginal = null;
+  document.getElementById('aviso-editando').classList.add('hidden');
+  document.getElementById('btn-salvar').textContent = 'Salvar Registro';
+  document.getElementById('btn-add-servico').classList.remove('hidden');
+}
+
+function cancelarEdicao(){
+  resetForm();
+  document.querySelector('.tab[data-tab="lista"]').click();
+}
+
+async function salvarRegistro(){
+  const cidade = document.getElementById('f-cidade').value.trim();
+  const ruaId = document.getElementById('f-rua').value;
+  const equipe = document.getElementById('f-equipe').value.trim();
+  const data = document.getElementById('f-data').value;
+  const obs = document.getElementById('f-obs').value.trim();
+
+  // A linha principal + as linhas extras adicionadas em "+ Outro serviço
+  // nesta mesma rua" viram, cada uma, um registro separado — todas com a
+  // mesma rua, data, equipe, observações e fotos. Editando, a linha
+  // principal atualiza o registro que já existia e as extras viram
+  // registros novos.
+  const linhas = [lerLinhaServico('f'), ...extrasServico.map(seq=>lerLinhaServico('se'+seq))];
+
+  for(const l of linhas){
+    if(!l.servico){
+      alert('Selecione o serviço em todas as linhas (ou remova as que não for usar).');
       return;
     }
-
-    // ---- Arquivos enviados (fotos) ----
-    if (method === "GET" && urlPath.startsWith("/uploads/")) {
-      if (serveStatic(req, res, UPLOADS_DIR, urlPath.replace("/uploads", ""), { cacheLongo: true })) return;
-      res.writeHead(404);
-      res.end("Não encontrado");
+    if(unidadeDoServico(l.servico) === 'R$' && !l.valor){
+      alert('Informe o Valor (R$) do custo mensal fixo para o serviço "' + l.servico + '".');
       return;
     }
-
-    // ---------------------------- API ----------------------------
-    if (urlPath.startsWith("/api/")) {
-      res.setHeader("Content-Type", "application/json; charset=utf-8");
-
-      // ---- Login / Logout / Quem sou eu ----
-      if (method === "POST" && urlPath === "/api/login") {
-        const body = await readJSON(req);
-        const usuario = String(body.usuario || "").trim();
-        const senha = String(body.senha || "");
-        const user = state.users.find((u) => u.usuario.toLowerCase() === usuario.toLowerCase());
-        if (!user || !verificarSenha(senha, user.senha)) {
-          return sendJSON(res, 401, { erro: "Usuário ou senha inválidos" });
-        }
-        const { token } = criarSessao(user.id);
-        // Cookie de sessão SEM Max-Age/Expires (de propósito): assim o
-        // navegador apaga o cookie quando o app/navegador é fechado de
-        // verdade, e da próxima vez que abrir precisa entrar com a senha de
-        // novo — em vez de ficar "lembrado" por dias. A sessão em si ainda
-        // tem um limite de 30 dias no servidor (SESSAO_DIAS em lib/auth.js),
-        // que só serve de segurança extra caso o cookie sobreviva de algum
-        // jeito (por exemplo, se o navegador do celular só "pausar" o app
-        // em vez de encerrar de verdade).
-        setCookie(res, COOKIE_NAME, token, {
-          secure: process.env.NODE_ENV === "production",
-        });
-        return sendJSON(res, 200, usuarioPublico(user));
-      }
-
-      if (method === "POST" && urlPath === "/api/logout") {
-        const cookies = parseCookies(req);
-        if (cookies[COOKIE_NAME]) destruirSessao(cookies[COOKIE_NAME]);
-        clearCookie(res, COOKIE_NAME);
-        return sendJSON(res, 200, { ok: true });
-      }
-
-      if (method === "GET" && urlPath === "/api/me") {
-        const user = getAuthUser(req);
-        if (!user) return sendJSON(res, 401, { erro: "Não autenticado" });
-        return sendJSON(res, 200, usuarioPublico(user));
-      }
-
-      // A partir daqui, todas as rotas exigem login.
-      const user = requireAuth(req, res);
-      if (!user) return;
-
-      // ---- Usuários (só admin) ----
-      if (urlPath === "/api/users") {
-        if (method === "GET") {
-          if (!requireAdmin(req, res)) return;
-          return sendJSON(res, 200, state.users.map(usuarioPublico));
-        }
-        if (method === "POST") {
-          if (!requireAdmin(req, res)) return;
-          const body = await readJSON(req);
-          const nome = String(body.nome || "").trim();
-          const usuario = String(body.usuario || "").trim();
-          const senha = String(body.senha || "");
-          const role = body.role === "admin" ? "admin" : "encarregado";
-          const cidadeId = role === "encarregado" && body.cidadeId ? String(body.cidadeId) : null;
-          if (!nome || !usuario || senha.length < 4) {
-            return sendJSON(res, 400, { erro: "Preencha nome, usuário e uma senha com pelo menos 4 caracteres." });
-          }
-          if (state.users.some((u) => u.usuario.toLowerCase() === usuario.toLowerCase())) {
-            return sendJSON(res, 409, { erro: "Já existe um usuário com esse nome de login." });
-          }
-          if (cidadeId && !state.cidades.some((c) => c.id === cidadeId)) {
-            return sendJSON(res, 400, { erro: "Cidade selecionada não existe." });
-          }
-          const novo = {
-            id: crypto.randomUUID(),
-            nome,
-            usuario,
-            senha: hashSenha(senha),
-            role,
-            cidadeId,
-            criadoEm: new Date().toISOString(),
-          };
-          state.users.push(novo);
-          persist();
-          return sendJSON(res, 201, usuarioPublico(novo));
-        }
-      }
-
-      const userIdMatch = urlPath.match(/^\/api\/users\/([^/]+)$/);
-      if (userIdMatch && method === "PUT") {
-        if (!requireAdmin(req, res)) return;
-        const id = decodeURIComponent(userIdMatch[1]);
-        const alvo = state.users.find((u) => u.id === id);
-        if (!alvo) return sendJSON(res, 404, { erro: "Usuário não encontrado." });
-        const body = await readJSON(req);
-        if (body.cidadeId !== undefined) {
-          const cidadeId = body.cidadeId ? String(body.cidadeId) : null;
-          if (cidadeId && !state.cidades.some((c) => c.id === cidadeId)) {
-            return sendJSON(res, 400, { erro: "Cidade selecionada não existe." });
-          }
-          alvo.cidadeId = cidadeId;
-        }
-        persist();
-        return sendJSON(res, 200, usuarioPublico(alvo));
-      }
-      if (userIdMatch && method === "DELETE") {
-        if (!requireAdmin(req, res)) return;
-        const id = decodeURIComponent(userIdMatch[1]);
-        if (id === user.id) return sendJSON(res, 400, { erro: "Você não pode remover seu próprio usuário." });
-        const alvo = state.users.find((u) => u.id === id);
-        if (!alvo) return sendJSON(res, 404, { erro: "Usuário não encontrado." });
-        const outrosAdmins = state.users.some((u) => u.role === "admin" && u.id !== id);
-        if (alvo.role === "admin" && !outrosAdmins) {
-          return sendJSON(res, 400, { erro: "Precisa existir pelo menos um administrador." });
-        }
-        state.users = state.users.filter((u) => u.id !== id);
-        state.sessions = state.sessions.filter((s) => s.userId !== id);
-        persist();
-        return sendJSON(res, 200, { ok: true });
-      }
-
-      // ---- Config (identificação da empresa) ----
-      if (urlPath === "/api/config") {
-        if (method === "GET") return sendJSON(res, 200, state.config);
-        if (method === "PUT") {
-          if (!requireAdmin(req, res)) return;
-          const body = await readJSON(req);
-          state.config = {
-            empresa: String(body.empresa || "").trim(),
-            cnpj: String(body.cnpj || "").trim(),
-            contrato: String(body.contrato || "").trim(),
-          };
-          persist();
-          return sendJSON(res, 200, state.config);
-        }
-      }
-
-      // ---- Cidades (só admin: lista completa, contratos e documentos) ----
-      // Um encarregado não enxerga a lista de cidades nem os contratos —
-      // ele só sabe o nome da própria cidade, devolvido em /api/me.
-      if (urlPath === "/api/cidades" || urlPath.startsWith("/api/cidades/")) {
-        if (!requireAdmin(req, res)) return;
-      }
-
-      // Cada cidade é um objeto {id, nome, contrato, responsavel, telefone}.
-      // O nome não muda depois de criado, para não desalinhar com os
-      // registros já lançados (que guardam a cidade como texto).
-      if (urlPath === "/api/cidades") {
-        if (method === "GET") return sendJSON(res, 200, state.cidades);
-        if (method === "POST") {
-          const body = await readJSON(req);
-          const nome = String(body.nome || "").trim();
-          if (!nome) return sendJSON(res, 400, { erro: "Informe o nome da cidade." });
-          if (state.cidades.some((c) => c.nome.toLowerCase() === nome.toLowerCase())) {
-            return sendJSON(res, 409, { erro: "Essa cidade já está cadastrada." });
-          }
-          const nova = {
-            id: crypto.randomUUID(),
-            nome,
-            contrato: String(body.contrato || "").trim(),
-            responsavel: String(body.responsavel || "").trim(),
-            telefone: String(body.telefone || "").trim(),
-            documentos: [],
-          };
-          state.cidades.push(nova);
-          state.cidades.sort((a, b) => a.nome.localeCompare(b.nome, "pt-BR"));
-          persist();
-          return sendJSON(res, 201, state.cidades);
-        }
-      }
-
-      // ---- Documentos da cidade (Contrato / Aditivo de contrato) ----
-      const cidadeDocsMatch = urlPath.match(/^\/api\/cidades\/([^/]+)\/documentos$/);
-      if (cidadeDocsMatch && method === "POST") {
-        const cidadeId = decodeURIComponent(cidadeDocsMatch[1]);
-        const alvo = state.cidades.find((c) => c.id === cidadeId);
-        if (!alvo) return sendJSON(res, 404, { erro: "Cidade não encontrada." });
-        const body = await readJSON(req);
-        const tipo = body.tipo === "aditivo" ? "aditivo" : "contrato";
-        const titulo = String(body.titulo || "").trim();
-        const url = salvarArquivoBase64(body.arquivo);
-        if (!url) return sendJSON(res, 400, { erro: "Anexe um arquivo em PDF, JPG, PNG ou WEBP." });
-        const doc = {
-          id: crypto.randomUUID(),
-          tipo,
-          titulo,
-          nomeArquivo: String(body.nomeArquivo || "").trim(),
-          url,
-          criadoPor: user.nome,
-          criadoEm: new Date().toISOString(),
-        };
-        if (!Array.isArray(alvo.documentos)) alvo.documentos = [];
-        alvo.documentos.push(doc);
-        persist();
-        return sendJSON(res, 201, state.cidades);
-      }
-      const cidadeDocMatch = urlPath.match(/^\/api\/cidades\/([^/]+)\/documentos\/([^/]+)$/);
-      if (cidadeDocMatch && method === "DELETE") {
-        const cidadeId = decodeURIComponent(cidadeDocMatch[1]);
-        const docId = decodeURIComponent(cidadeDocMatch[2]);
-        const alvo = state.cidades.find((c) => c.id === cidadeId);
-        if (!alvo) return sendJSON(res, 404, { erro: "Cidade não encontrada." });
-        const doc = (alvo.documentos || []).find((d) => d.id === docId);
-        if (doc) removerFotoSeForUpload(doc.url);
-        alvo.documentos = (alvo.documentos || []).filter((d) => d.id !== docId);
-        persist();
-        return sendJSON(res, 200, state.cidades);
-      }
-
-      const cidadeMatch = urlPath.match(/^\/api\/cidades\/([^/]+)$/);
-      if (cidadeMatch && method === "PUT") {
-        const id = decodeURIComponent(cidadeMatch[1]);
-        const alvo = state.cidades.find((c) => c.id === id);
-        if (!alvo) return sendJSON(res, 404, { erro: "Cidade não encontrada." });
-        const body = await readJSON(req);
-        if (body.contrato !== undefined) alvo.contrato = String(body.contrato || "").trim();
-        if (body.responsavel !== undefined) alvo.responsavel = String(body.responsavel || "").trim();
-        if (body.telefone !== undefined) alvo.telefone = String(body.telefone || "").trim();
-        persist();
-        return sendJSON(res, 200, state.cidades);
-      }
-      if (cidadeMatch && method === "DELETE") {
-        const id = decodeURIComponent(cidadeMatch[1]);
-        const alvo = state.cidades.find((c) => c.id === id);
-        if (alvo) (alvo.documentos || []).forEach((d) => removerFotoSeForUpload(d.url));
-        state.cidades = state.cidades.filter((c) => c.id !== id);
-        state.ruas = state.ruas.filter((r) => r.cidadeId !== id); // remove também as ruas dessa cidade
-        if (alvo) delete state.metas[alvo.nome]; // remove também as metas dessa cidade
-        persist();
-        return sendJSON(res, 200, state.cidades);
-      }
-
-      // ---- Ruas ----
-      // Só o administrador cadastra ruas (nome, número, bairro, vinculadas
-      // a uma cidade). O encarregado só ENXERGA e ESCOLHE, na cidade dele —
-      // não digita rua livremente, para manter a lista padronizada.
-      if (urlPath === "/api/ruas") {
-        if (method === "GET") {
-          if (user.role === "admin") {
-            const url = new URL(req.url, "http://x");
-            const filtroCidadeId = url.searchParams.get("cidadeId");
-            const lista = filtroCidadeId ? state.ruas.filter((r) => r.cidadeId === filtroCidadeId) : state.ruas;
-            return sendJSON(res, 200, lista);
-          }
-          const minhaCidadeId = user.cidadeId || null;
-          return sendJSON(res, 200, minhaCidadeId ? state.ruas.filter((r) => r.cidadeId === minhaCidadeId) : []);
-        }
-        if (method === "POST") {
-          if (!requireAdmin(req, res)) return;
-          const body = await readJSON(req);
-          const cidadeId = String(body.cidadeId || "");
-          const nome = String(body.nome || "").trim();
-          if (!cidadeId || !state.cidades.some((c) => c.id === cidadeId)) {
-            return sendJSON(res, 400, { erro: "Selecione uma cidade válida." });
-          }
-          if (!nome) return sendJSON(res, 400, { erro: "Informe o nome da rua." });
-          const nova = {
-            id: crypto.randomUUID(),
-            cidadeId,
-            nome,
-            numero: String(body.numero || "").trim(),
-            bairro: String(body.bairro || "").trim(),
-            criadoEm: new Date().toISOString(),
-          };
-          state.ruas.push(nova);
-          persist();
-          return sendJSON(res, 201, state.ruas.filter((r) => r.cidadeId === cidadeId));
-        }
-      }
-      const ruaMatch = urlPath.match(/^\/api\/ruas\/([^/]+)$/);
-      if (ruaMatch && method === "PUT") {
-        if (!requireAdmin(req, res)) return;
-        const id = decodeURIComponent(ruaMatch[1]);
-        const alvo = state.ruas.find((r) => r.id === id);
-        if (!alvo) return sendJSON(res, 404, { erro: "Rua não encontrada." });
-        const body = await readJSON(req);
-        if (body.nome !== undefined) alvo.nome = String(body.nome || "").trim();
-        if (body.numero !== undefined) alvo.numero = String(body.numero || "").trim();
-        if (body.bairro !== undefined) alvo.bairro = String(body.bairro || "").trim();
-        persist();
-        return sendJSON(res, 200, state.ruas.filter((r) => r.cidadeId === alvo.cidadeId));
-      }
-      if (ruaMatch && method === "DELETE") {
-        if (!requireAdmin(req, res)) return;
-        const id = decodeURIComponent(ruaMatch[1]);
-        const alvo = state.ruas.find((r) => r.id === id);
-        const cidadeId = alvo ? alvo.cidadeId : null;
-        state.ruas = state.ruas.filter((r) => r.id !== id);
-        persist();
-        return sendJSON(res, 200, cidadeId ? state.ruas.filter((r) => r.cidadeId === cidadeId) : []);
-      }
-
-      // ---- Serviços ----
-      // Qualquer um logado pode VER a lista (precisa pra escolher o serviço
-      // em "+ Registro" e ver as metas); só o administrador cadastra, edita
-      // a unidade ou remove. O nome não muda depois de criado, pra não
-      // desalinhar dos registros e metas já lançados (que guardam o serviço
-      // pelo nome, não por id).
-      // O valor cobrado (valorUnitario e precosPorCidade — cada cidade pode
-      // ter um valor diferente pro mesmo serviço, por causa de contratos
-      // diferentes) é informação sensível de preço — só o administrador pode
-      // ver, então é removido da resposta pra quem não é admin (mesmo que
-      // peçam a API direto, não só pela tela).
-      if (urlPath === "/api/servicos") {
-        if (method === "GET") {
-          const lista = user.role === "admin" ? state.servicos : state.servicos.map((s) => {
-            const { valorUnitario, precosPorCidade, ...semValor } = s;
-            // Não manda os valores (sensível, só admin vê), mas manda quais
-            // cidades têm esse serviço "ativado" (têm algum valor cadastrado)
-            // — sem isso ninguém além do admin conseguiria saber quais
-            // serviços aparecem pra lançar em cada cidade.
-            return { ...semValor, cidadesDisponiveis: Object.keys(precosPorCidade || {}) };
-          });
-          return sendJSON(res, 200, lista);
-        }
-        if (method === "POST") {
-          if (!requireAdmin(req, res)) return;
-          const body = await readJSON(req);
-          const nome = String(body.nome || "").trim();
-          const unidade = String(body.unidade || "").trim();
-          const valorUnitario = body.valorUnitario !== undefined && body.valorUnitario !== "" ? parseFloat(body.valorUnitario) || 0 : 0;
-          if (!nome) return sendJSON(res, 400, { erro: "Informe o nome do serviço." });
-          if (!unidade) return sendJSON(res, 400, { erro: "Informe a unidade de medida." });
-          if (state.servicos.some((s) => s.nome.toLowerCase() === nome.toLowerCase())) {
-            return sendJSON(res, 409, { erro: "Esse serviço já está cadastrado." });
-          }
-          const novo = { id: crypto.randomUUID(), nome, unidade, valorUnitario, precosPorCidade: {}, criadoEm: new Date().toISOString() };
-          state.servicos.push(novo);
-          persist();
-          return sendJSON(res, 201, state.servicos);
-        }
-      }
-      const servicoMatch = urlPath.match(/^\/api\/servicos\/([^/]+)$/);
-      if (servicoMatch && method === "PUT") {
-        if (!requireAdmin(req, res)) return;
-        const id = decodeURIComponent(servicoMatch[1]);
-        const alvo = state.servicos.find((s) => s.id === id);
-        if (!alvo) return sendJSON(res, 404, { erro: "Serviço não encontrado." });
-        const body = await readJSON(req);
-        if (body.unidade !== undefined) {
-          const unidade = String(body.unidade || "").trim();
-          if (!unidade) return sendJSON(res, 400, { erro: "Informe a unidade de medida." });
-          alvo.unidade = unidade;
-        }
-        if (body.valorUnitario !== undefined) {
-          alvo.valorUnitario = body.valorUnitario === "" ? 0 : parseFloat(body.valorUnitario) || 0;
-        }
-        // Valor específico de uma cidade pra esse serviço (contratos
-        // diferentes cobram valores diferentes pelo mesmo serviço). Enviar
-        // precoValor vazio remove a customização (volta a usar o padrão).
-        if (body.precoCidadeId !== undefined) {
-          const cidadeId = String(body.precoCidadeId || "").trim();
-          const cidadeObj = state.cidades.find((c) => c.id === cidadeId);
-          if (!cidadeObj) return sendJSON(res, 400, { erro: "Cidade não encontrada." });
-          if (!alvo.precosPorCidade) alvo.precosPorCidade = {};
-          if (body.precoValor === undefined || body.precoValor === "") {
-            delete alvo.precosPorCidade[cidadeId];
-          } else {
-            alvo.precosPorCidade[cidadeId] = parseFloat(body.precoValor) || 0;
-          }
-        }
-        persist();
-        return sendJSON(res, 200, state.servicos);
-      }
-      if (servicoMatch && method === "DELETE") {
-        if (!requireAdmin(req, res)) return;
-        const id = decodeURIComponent(servicoMatch[1]);
-        const alvo = state.servicos.find((s) => s.id === id);
-        state.servicos = state.servicos.filter((s) => s.id !== id);
-        if (alvo) {
-          // remove a meta desse serviço em todas as cidades
-          for (const cidadeNome of Object.keys(state.metas)) {
-            if (state.metas[cidadeNome]) delete state.metas[cidadeNome][alvo.nome];
-          }
-        }
-        persist();
-        return sendJSON(res, 200, state.servicos);
-      }
-
-      // ---- Metas ----
-      // Cada cidade tem seu próprio conjunto de metas por serviço (uma
-      // cidade pode ter uma meta bem diferente da outra). Qualquer um
-      // logado pode VER o progresso da cidade dele; só o administrador
-      // define o valor da meta, e pode escolher qualquer cidade. Um
-      // encarregado só enxerga a própria cidade, mesmo que tente pedir
-      // outra pela API.
-      if (urlPath === "/api/metas") {
-        if (method === "GET") {
-          const url = new URL(req.url, "http://x");
-          let cidade = url.searchParams.get("cidade") || "";
-          if (user.role !== "admin") {
-            cidade = cidadeDoUsuario(user) || "";
-          }
-          if (!cidade) return sendJSON(res, 200, {});
-          return sendJSON(res, 200, state.metas[cidade] || {});
-        }
-        if (method === "PUT") {
-          if (!requireAdmin(req, res)) return;
-          const body = await readJSON(req);
-          const cidade = String(body.cidade || "").trim();
-          const servico = String(body.servico || "");
-          const valor = parseFloat(body.valor);
-          if (!cidade) return sendJSON(res, 400, { erro: "Selecione uma cidade." });
-          if (!servico) return sendJSON(res, 400, { erro: "Serviço não informado." });
-          if (!state.metas[cidade]) state.metas[cidade] = {};
-          if (valor > 0) state.metas[cidade][servico] = valor;
-          else delete state.metas[cidade][servico];
-          persist();
-          return sendJSON(res, 200, state.metas[cidade]);
-        }
-      }
-
-      // ---- Baixar fotos em ZIP (só administrador) ----
-      // Usa os mesmos filtros da aba Exportar (cidade + mês OU período) e
-      // organiza as fotos em pastas: Cidade/AAAA-MM-DD/Rua_Serviço_ANTES.jpg
-      // (a data no formato ano-mês-dia pra as pastas ficarem em ordem
-      // cronológica quando abertas no computador).
-      if (method === "GET" && urlPath === "/api/exportar/fotos.zip") {
-        if (user.role !== "admin") return sendJSON(res, 403, { erro: "Somente administradores" });
-        const url = new URL(req.url, "http://x");
-        const fCidade = url.searchParams.get("cidade") || "";
-        const fMes = url.searchParams.get("mes") || "";
-        const fInicio = url.searchParams.get("inicio") || "";
-        const fFim = url.searchParams.get("fim") || "";
-        const usaPeriodo = !!(fInicio || fFim);
-
-        const limpar = (s) =>
-          String(s || "")
-            .replace(/[\\/:*?"<>|\u0000-\u001f]/g, "")
-            .replace(/\s+/g, " ")
-            .trim()
-            .slice(0, 80) || "sem-nome";
-
-        const selecionados = state.entries
-          .filter((e) => (e.fotoAntes || e.fotoDepois))
-          .filter((e) => !fCidade || e.cidade === fCidade)
-          .filter((e) => {
-            const d = e.data || "";
-            if (usaPeriodo) return (!fInicio || d >= fInicio) && (!fFim || d <= fFim);
-            return !fMes || d.slice(0, 7) === fMes;
-          })
-          .sort((a, b) => (a.cidade || "").localeCompare(b.cidade || "") || (a.data || "").localeCompare(b.data || ""));
-
-        const arquivos = [];
-        const nomesUsados = new Set();
-        for (const e of selecionados) {
-          const pasta = limpar(e.cidade) + "/" + limpar(e.data);
-          let base = limpar(e.rua || "Sem rua");
-          if (e.numero) base += " " + limpar(e.numero);
-          base += " - " + limpar(e.servico);
-          for (const [campo, rotulo] of [["fotoAntes", "ANTES"], ["fotoDepois", "DEPOIS"]]) {
-            const u = e[campo];
-            if (!u || typeof u !== "string" || !u.startsWith("/uploads/")) continue;
-            const arquivoNoDisco = path.join(UPLOADS_DIR, path.basename(u));
-            const ext = path.extname(u) || ".jpg";
-            let nome = `${pasta}/${base} - ${rotulo}${ext}`;
-            let n = 2;
-            while (nomesUsados.has(nome)) nome = `${pasta}/${base} - ${rotulo} (${n++})${ext}`;
-            nomesUsados.add(nome);
-            arquivos.push({ nome, caminho: arquivoNoDisco });
-          }
-        }
-
-        if (arquivos.length === 0) {
-          return sendJSON(res, 404, { erro: "Nenhuma foto encontrada pra esse filtro." });
-        }
-
-        const periodo = usaPeriodo ? `${fInicio || "inicio"}_a_${fFim || "fim"}` : fMes || "todos";
-        const nomeZip = `Fotos_${limpar(fCidade || "Todas as cidades")}_${periodo}.zip`;
-        const nomeAscii = nomeZip.normalize("NFD").replace(/[^\x20-\x7e]/g, "").replace(/"/g, "");
-        res.writeHead(200, {
-          "Content-Type": "application/zip",
-          "Content-Disposition": `attachment; filename="${nomeAscii}"; filename*=UTF-8''${encodeURIComponent(nomeZip)}`,
-          "Cache-Control": "no-store",
-        });
-        try {
-          await escreverZip(res, arquivos);
-        } catch (e) {
-          // quem pediu fechou a conexão no meio (cancelou o download) — só encerra
-          res.destroy();
-        }
-        return;
-      }
-
-      // ---- Registros (entries) ----
-      // O administrador vê e mexe em tudo. Um encarregado só vê, cria e
-      // apaga registros da cidade que foi atribuída a ele — mesmo que
-      // tente forçar outra cidade pela API, o servidor ignora e usa a
-      // cidade cadastrada no perfil dele.
-      const minhaCidade = user.role === "admin" ? null : cidadeDoUsuario(user);
-      if (urlPath === "/api/entries") {
-        if (method === "GET") {
-          const lista = user.role === "admin" ? state.entries : state.entries.filter((e) => e.cidade === minhaCidade);
-          return sendJSON(res, 200, lista);
-        }
-        if (method === "POST") {
-          const body = await readJSON(req);
-          let cidade = String(body.cidade || "").trim();
-          let cidadeId = null;
-          if (user.role !== "admin") {
-            if (!minhaCidade) {
-              return sendJSON(res, 403, { erro: "Você ainda não tem uma cidade atribuída. Fale com o administrador." });
-            }
-            cidade = minhaCidade;
-            cidadeId = user.cidadeId || null;
-          } else {
-            const cidadeObj = state.cidades.find((c) => c.nome === cidade);
-            cidadeId = cidadeObj ? cidadeObj.id : null;
-          }
-          // O serviço tem que ser um dos já cadastrados (aba Serviços) — guardamos
-          // a unidade de medida junto no registro (denormalizada), pra manter o
-          // histórico correto mesmo se o serviço mudar depois.
-          const servico = String(body.servico || "").trim();
-          const servicoObj = servico ? state.servicos.find((s) => s.nome === servico) : null;
-          // Serviço "R$" (custo mensal fixo, tipo "Equipe Padrão") é uma ajuda
-          // de custo da cidade — só o administrador lança, e não tem rua (não
-          // tem local físico, só precisa entrar na Medição do mês).
-          const isValorFixo = servicoObj && servicoObj.unidade === "R$";
-          if (isValorFixo && user.role !== "admin") {
-            return sendJSON(res, 403, { erro: "Apenas o administrador pode lançar esse serviço (custo mensal fixo)." });
-          }
-          // A rua tem que ser uma das já cadastradas (pelo administrador) para
-          // essa cidade — o campo é sempre um ruaId, nunca texto livre, para
-          // manter a lista padronizada e evitar nomes divergentes.
-          const ruaId = String(body.ruaId || "").trim();
-          const ruaObj = ruaId ? state.ruas.find((r) => r.id === ruaId && r.cidadeId === cidadeId) : null;
-          const data = String(body.data || "").trim();
-          if (!cidade || (!ruaObj && !isValorFixo) || !servicoObj || !data) {
-            return sendJSON(res, 400, { erro: "Preencha ao menos Cidade, Rua, Serviço e Data. Verifique se a rua e o serviço estão cadastrados." });
-          }
-          const entry = {
-            id: crypto.randomUUID(),
-            cidade,
-            ruaId: ruaObj ? ruaObj.id : "",
-            rua: ruaObj ? ruaObj.nome : "",
-            numero: ruaObj ? ruaObj.numero || "" : "",
-            bairro: ruaObj ? ruaObj.bairro || "" : "",
-            extensao: body.extensao || "",
-            largura: body.largura || "",
-            lados: body.lados || "",
-            valor: body.valor || "",
-            servico,
-            unidade: servicoObj.unidade,
-            equipe: String(body.equipe || "").trim(),
-            data,
-            obs: String(body.obs || "").trim(),
-            fotoAntes: salvarFotoBase64(body.fotoAntes),
-            fotoDepois: salvarFotoBase64(body.fotoDepois),
-            // Versões leves (miniaturas) usadas na lista e no relatório
-            // fotográfico — geradas no celular junto com a foto completa.
-            fotoAntesMini: body.fotoAntes ? salvarFotoBase64(body.fotoAntesMini) : null,
-            fotoDepoisMini: body.fotoDepois ? salvarFotoBase64(body.fotoDepoisMini) : null,
-            criadoPor: user.nome,
-            criadoEm: new Date().toISOString(),
-          };
-          state.entries.push(entry);
-          persist();
-          return sendJSON(res, 201, entry);
-        }
-      }
-      const entryMatch = urlPath.match(/^\/api\/entries\/([^/]+)$/);
-      if (entryMatch && method === "PUT") {
-        const id = decodeURIComponent(entryMatch[1]);
-        const alvo = state.entries.find((e) => e.id === id);
-        if (!alvo) return sendJSON(res, 404, { erro: "Registro não encontrado." });
-        if (user.role !== "admin" && alvo.cidade !== minhaCidade) {
-          return sendJSON(res, 403, { erro: "Você só pode editar registros da sua cidade." });
-        }
-        const body = await readJSON(req);
-
-        // A cidade só muda de verdade para o administrador — o encarregado
-        // continua preso à própria cidade, igual acontece ao criar (POST).
-        let cidade = alvo.cidade;
-        let cidadeId = null;
-        if (user.role === "admin") {
-          if (body.cidade !== undefined) cidade = String(body.cidade || "").trim();
-          const cidadeObj = state.cidades.find((c) => c.nome === cidade);
-          cidadeId = cidadeObj ? cidadeObj.id : null;
-        } else {
-          cidade = minhaCidade;
-          cidadeId = user.cidadeId || null;
-        }
-
-        const servico = body.servico !== undefined ? String(body.servico || "").trim() : alvo.servico;
-        const servicoObj = servico ? state.servicos.find((s) => s.nome === servico) : null;
-        // Serviço "R$" (custo mensal fixo, tipo "Equipe Padrão") é uma ajuda
-        // de custo — só o administrador mexe nesses registros, e não precisa
-        // de rua (nem o próprio registro já editado, nem trocar pra um).
-        const isValorFixo = servicoObj && servicoObj.unidade === "R$";
-        if ((isValorFixo || alvo.unidade === "R$") && user.role !== "admin") {
-          return sendJSON(res, 403, { erro: "Apenas o administrador pode editar esse serviço (custo mensal fixo)." });
-        }
-
-        const ruaId = body.ruaId !== undefined ? String(body.ruaId || "").trim() : alvo.ruaId;
-        const ruaObj = ruaId ? state.ruas.find((r) => r.id === ruaId && r.cidadeId === cidadeId) : null;
-
-        const data = body.data !== undefined ? String(body.data || "").trim() : alvo.data;
-
-        if (!cidade || (!ruaObj && !isValorFixo) || !servicoObj || !data) {
-          return sendJSON(res, 400, { erro: "Preencha ao menos Cidade, Rua, Serviço e Data. Verifique se a rua e o serviço estão cadastrados." });
-        }
-
-        alvo.cidade = cidade;
-        alvo.ruaId = ruaObj ? ruaObj.id : "";
-        alvo.rua = ruaObj ? ruaObj.nome : "";
-        alvo.numero = ruaObj ? ruaObj.numero || "" : "";
-        alvo.bairro = ruaObj ? ruaObj.bairro || "" : "";
-        if (body.extensao !== undefined) alvo.extensao = body.extensao;
-        if (body.largura !== undefined) alvo.largura = body.largura;
-        if (body.lados !== undefined) alvo.lados = body.lados;
-        if (body.valor !== undefined) alvo.valor = body.valor;
-        alvo.servico = servico;
-        alvo.unidade = servicoObj.unidade;
-        if (body.equipe !== undefined) alvo.equipe = String(body.equipe || "").trim();
-        alvo.data = data;
-        if (body.obs !== undefined) alvo.obs = String(body.obs || "").trim();
-
-        // Fotos: só mexe se vier um valor novo de verdade (uma foto nova em
-        // base64, ou null explícito para remover) — se vier a mesma URL que
-        // já estava salva (foto não trocada), não faz nada.
-        if (body.fotoAntes !== undefined && body.fotoAntes !== alvo.fotoAntes) {
-          if (body.fotoAntes === null) {
-            removerFotoSeForUpload(alvo.fotoAntes);
-            removerFotoSeForUpload(alvo.fotoAntesMini);
-            alvo.fotoAntes = null;
-            alvo.fotoAntesMini = null;
-          } else {
-            const nova = salvarFotoBase64(body.fotoAntes);
-            if (nova) {
-              removerFotoSeForUpload(alvo.fotoAntes);
-              removerFotoSeForUpload(alvo.fotoAntesMini);
-              alvo.fotoAntes = nova;
-              alvo.fotoAntesMini = salvarFotoBase64(body.fotoAntesMini);
-            }
-          }
-        }
-        if (body.fotoDepois !== undefined && body.fotoDepois !== alvo.fotoDepois) {
-          if (body.fotoDepois === null) {
-            removerFotoSeForUpload(alvo.fotoDepois);
-            removerFotoSeForUpload(alvo.fotoDepoisMini);
-            alvo.fotoDepois = null;
-            alvo.fotoDepoisMini = null;
-          } else {
-            const nova = salvarFotoBase64(body.fotoDepois);
-            if (nova) {
-              removerFotoSeForUpload(alvo.fotoDepois);
-              removerFotoSeForUpload(alvo.fotoDepoisMini);
-              alvo.fotoDepois = nova;
-              alvo.fotoDepoisMini = salvarFotoBase64(body.fotoDepoisMini);
-            }
-          }
-        }
-
-        alvo.editadoPor = user.nome;
-        alvo.editadoEm = new Date().toISOString();
-
-        persist();
-        return sendJSON(res, 200, alvo);
-      }
-      if (entryMatch && method === "DELETE") {
-        const id = decodeURIComponent(entryMatch[1]);
-        const alvo = state.entries.find((e) => e.id === id);
-        if (alvo && user.role !== "admin" && alvo.cidade !== minhaCidade) {
-          return sendJSON(res, 403, { erro: "Você só pode excluir registros da sua cidade." });
-        }
-        if (alvo && alvo.unidade === "R$" && user.role !== "admin") {
-          return sendJSON(res, 403, { erro: "Apenas o administrador pode excluir esse serviço (custo mensal fixo)." });
-        }
-        if (alvo) {
-          removerFotoSeForUpload(alvo.fotoAntes);
-          removerFotoSeForUpload(alvo.fotoDepois);
-          removerFotoSeForUpload(alvo.fotoAntesMini);
-          removerFotoSeForUpload(alvo.fotoDepoisMini);
-        }
-        state.entries = state.entries.filter((e) => e.id !== id);
-        persist();
-        return sendJSON(res, 200, { ok: true });
-      }
-
-      // ---- Otimizar fotos antigas (só administrador) ----
-      // Recebe a miniatura (e, se a foto antiga for pesada demais, uma
-      // versão completa já comprimida) gerada no navegador do administrador,
-      // e troca no registro — apagando do disco o arquivo antigo substituído.
-      const otimizarMatch = urlPath.match(/^\/api\/entries\/([^/]+)\/otimizar-fotos$/);
-      if (otimizarMatch && method === "PUT") {
-        if (user.role !== "admin") return sendJSON(res, 403, { erro: "Somente administradores" });
-        const id = decodeURIComponent(otimizarMatch[1]);
-        const alvo = state.entries.find((e) => e.id === id);
-        if (!alvo) return sendJSON(res, 404, { erro: "Registro não encontrado." });
-        const body = await readJSON(req);
-        for (const campo of ["fotoAntes", "fotoDepois"]) {
-          if (!alvo[campo]) continue;
-          const mini = salvarFotoBase64(body[campo + "Mini"]);
-          if (mini) {
-            removerFotoSeForUpload(alvo[campo + "Mini"]);
-            alvo[campo + "Mini"] = mini;
-          }
-          const completa = salvarFotoBase64(body[campo]);
-          if (completa) {
-            removerFotoSeForUpload(alvo[campo]);
-            alvo[campo] = completa;
-          }
-        }
-        persist();
-        return sendJSON(res, 200, alvo);
-      }
-
-      return sendJSON(res, 404, { erro: "Rota não encontrada." });
-    }
-
-    // ------------------------ Arquivos estáticos (app) ------------------------
-    if (method === "GET" || method === "HEAD") {
-      if (serveStatic(req, res, PUBLIC_DIR, urlPath)) return;
-      // qualquer outra rota cai no index.html (app de página única)
-      if (serveStatic(req, res, PUBLIC_DIR, "/index.html")) return;
-    }
-
-    res.writeHead(404);
-    res.end("Não encontrado");
-  } catch (err) {
-    const status = err && err.status ? err.status : 500;
-    console.error(err);
-    sendJSON(res, status, { erro: err.message || "Erro interno" });
   }
-});
 
-server.listen(PORT, () => {
-  console.log(`Coleta de Campo rodando em http://localhost:${PORT}`);
-});
-
-// Ao desligar o processo (por exemplo, quando o Coolify troca pra uma nova
-// versão), grava o banco uma última vez de forma síncrona antes de sair —
-// como o salvamento normal agora é em segundo plano (persist(), em
-// lib/db.js), sem isso a última alteração feita bem antes do desligamento
-// poderia se perder caso ainda estivesse gravando.
-function encerrarComGravacaoFinal() {
-  try {
-    persistSync();
-  } catch (e) {
-    console.error("Falha ao gravar o banco de dados no desligamento:", e.message);
+  // Rua é obrigatória, exceto quando todo mundo que está sendo salvo é
+  // serviço "R$" (ajuda de custo mensal, tipo "Equipe Padrão") — esse não
+  // tem local físico, só precisa entrar na Medição da cidade.
+  const todosValorFixo = linhas.every(l=>unidadeDoServico(l.servico) === 'R$');
+  if(!cidade || (!ruaId && !todosValorFixo) || !data){
+    alert('Preencha ao menos Cidade' + (todosValorFixo ? '' : ', Rua') + ' e Data.');
+    return;
   }
-  process.exit(0);
+
+  const btn = document.getElementById('btn-salvar');
+  const editando = !!editandoId;
+  btn.disabled = true;
+  btn.textContent = editando ? 'Salvando alterações...' : (linhas.length > 1 ? `Salvando ${linhas.length} serviços...` : 'Salvando...');
+  try{
+    if(editando){
+      const l = linhas[0];
+      const ruaIdLinha = unidadeDoServico(l.servico) === 'R$' ? '' : ruaId;
+      const atualizado = await api('PUT', '/api/entries/' + encodeURIComponent(editandoId), {
+        cidade, ruaId: ruaIdLinha, equipe, data, obs,
+        servico: l.servico, extensao: l.extensao, largura: l.largura, lados: l.lados, valor: l.valor,
+        fotoAntes: fotoAntesData, fotoDepois: fotoDepoisData,
+        fotoAntesMini: fotoAntesMini || undefined, fotoDepoisMini: fotoDepoisMini || undefined
+      });
+      // Serviços extras adicionados na edição: registros novos que
+      // aproveitam as fotos do registro (o servidor faz uma cópia delas).
+      const extras = linhas.slice(1);
+      for(const lx of extras){
+        const ruaIdExtra = unidadeDoServico(lx.servico) === 'R$' ? '' : ruaId;
+        const semFoto = unidadeDoServico(lx.servico) === 'R$';
+        await api('POST', '/api/entries', {
+          cidade, ruaId: ruaIdExtra, equipe, data, obs,
+          servico: lx.servico, extensao: lx.extensao, largura: lx.largura, lados: lx.lados, valor: lx.valor,
+          fotoAntes: semFoto ? null : (atualizado.fotoAntes || null),
+          fotoDepois: semFoto ? null : (atualizado.fotoDepois || null),
+          fotoAntesMini: semFoto ? undefined : (atualizado.fotoAntesMini || undefined),
+          fotoDepoisMini: semFoto ? undefined : (atualizado.fotoDepoisMini || undefined)
+        });
+      }
+      toast(extras.length ? 'Registro atualizado ✓ + ' + extras.length + ' serviço(s) adicionado(s)' : 'Registro atualizado ✓');
+    } else {
+      for(const l of linhas){
+        const ruaIdLinha = unidadeDoServico(l.servico) === 'R$' ? '' : ruaId;
+        await api('POST', '/api/entries', {
+          cidade, ruaId: ruaIdLinha, equipe, data, obs,
+          servico: l.servico, extensao: l.extensao, largura: l.largura, lados: l.lados, valor: l.valor,
+          fotoAntes: fotoAntesData, fotoDepois: fotoDepoisData,
+          fotoAntesMini: fotoAntesMini || undefined, fotoDepoisMini: fotoDepoisMini || undefined
+        });
+      }
+      toast(linhas.length > 1 ? linhas.length + ' registros salvos ✓' : 'Registro salvo ✓');
+    }
+    resetForm();
+    if(editando) document.querySelector('.tab[data-tab="lista"]').click();
+  }catch(e){
+    alert('Não consegui salvar. ' + e.message);
+  }finally{
+    btn.disabled = false; btn.textContent = editandoId ? 'Salvar Alterações' : 'Salvar Registro';
+  }
 }
-process.on("SIGTERM", encerrarComGravacaoFinal);
-process.on("SIGINT", encerrarComGravacaoFinal);
+
+function excluirRegistro(id){
+  confirmarAcao('Excluir este registro?', async ()=>{
+    try{
+      await api('DELETE', '/api/entries/' + encodeURIComponent(id));
+      toast('Registro excluído ✓');
+      await renderLista();
+    }catch(e){
+      alert('Não consegui excluir. ' + e.message);
+    }
+  });
+}
+
+function mesRef(dataStr){
+  if(!dataStr) return '';
+  const [y,m] = dataStr.split('-');
+  const meses = ['Jan','Fev','Mar','Abr','Mai','Jun','Jul','Ago','Set','Out','Nov','Dez'];
+  return meses[parseInt(m,10)-1] + '/' + y;
+}
+function mesKey(dataStr){
+  if(!dataStr) return '';
+  const [y,m] = dataStr.split('-');
+  return y+'-'+m;
+}
+
+function popularFiltros(){
+  const meses = [...new Set(ENTRIES.map(e=>mesKey(e.data)))].sort().reverse();
+  const cidadesEntries = [...new Set(ENTRIES.map(e=>e.cidade))].sort((a,b)=>a.localeCompare(b,'pt-BR'));
+
+  const fMes = document.getElementById('filtro-mes');
+  const valorMes = fMes.value;
+  fMes.innerHTML = '<option value="">Todos os meses</option>' + meses.map(m=>`<option value="${m}">${mesRef(m+'-01')}</option>`).join('');
+  if(meses.includes(valorMes)) fMes.value = valorMes;
+
+  const fCidade = document.getElementById('filtro-cidade');
+  const valorCidade = fCidade.value;
+  fCidade.innerHTML = '<option value="">Todas as cidades</option>' + cidadesEntries.map(c=>`<option value="${c}">${c}</option>`).join('');
+  if(cidadesEntries.includes(valorCidade)) fCidade.value = valorCidade;
+
+  const expMes = document.getElementById('exp-mes');
+  expMes.innerHTML = meses.map(m=>`<option value="${m}">${mesRef(m+'-01')}</option>`).join('') || '<option value="">Sem registros</option>';
+
+  const expCidade = document.getElementById('exp-cidade');
+  const valorExpCidade = expCidade.value;
+  expCidade.innerHTML = '<option value="">Todas as cidades</option>' + cidadesEntries.map(c=>`<option value="${c}">${c}</option>`).join('');
+  if(cidadesEntries.includes(valorExpCidade)) expCidade.value = valorExpCidade;
+  usarPeriodoExport(); // mantém o mês desabilitado/nota certa se um período já estava escolhido
+
+  popularSelectCidade();
+}
+
+// ---- Filtro de período na aba Exportar: mês (padrão) OU um período de
+// datas específico, que quando preenchido substitui o mês. ----
+function periodoExportAtivo(){
+  return !!(document.getElementById('exp-data-inicio').value || document.getElementById('exp-data-fim').value);
+}
+
+function usarPeriodoExport(){
+  const ativo = periodoExportAtivo();
+  document.getElementById('exp-mes').disabled = ativo;
+  document.getElementById('exp-periodo-nota').textContent = ativo
+    ? 'Usando o período escolhido acima (o mês selecionado foi ignorado). Apague as datas pra voltar a usar o mês.'
+    : 'Preencher a data inicial e/ou final substitui o mês escolhido acima.';
+}
+
+function limparPeriodoExport(){
+  document.getElementById('exp-data-inicio').value = '';
+  document.getElementById('exp-data-fim').value = '';
+  usarPeriodoExport();
+}
+
+// Devolve a função de filtro por data (pro Array.filter) e o texto do
+// período pronto pra mostrar nos relatórios, já considerando se tem um
+// período específico escolhido ou se é pra usar o mês de referência.
+function filtroPeriodoExport(){
+  const inicio = document.getElementById('exp-data-inicio').value;
+  const fim = document.getElementById('exp-data-fim').value;
+  if(inicio || fim){
+    const label = inicio && fim
+      ? inicio.split('-').reverse().join('/') + ' a ' + fim.split('-').reverse().join('/')
+      : inicio
+        ? 'A partir de ' + inicio.split('-').reverse().join('/')
+        : 'Até ' + fim.split('-').reverse().join('/');
+    return { filtro: (e)=>(!inicio || e.data >= inicio) && (!fim || e.data <= fim), label };
+  }
+  const mes = document.getElementById('exp-mes').value;
+  return { filtro: (e)=>!mes || mesKey(e.data) === mes, label: mes ? mesRef(mes+'-01') : 'Todos os períodos' };
+}
+
+// Texto curto do período pra usar no nome do arquivo baixado (CSV).
+function periodoSlugExport(){
+  const inicio = document.getElementById('exp-data-inicio').value;
+  const fim = document.getElementById('exp-data-fim').value;
+  if(inicio || fim) return (inicio || 'inicio') + '_a_' + (fim || 'fim');
+  const mes = document.getElementById('exp-mes').value;
+  return mes || 'todos';
+}
+
+async function renderLista(){
+  await refreshEntries();
+  popularFiltros();
+  const entries = [...ENTRIES].sort((a,b)=> b.data.localeCompare(a.data) || (b.criadoEm||'').localeCompare(a.criadoEm||''));
+  const fMes = document.getElementById('filtro-mes').value;
+  const fCidade = document.getElementById('filtro-cidade').value;
+
+  document.getElementById('filtro-mes').onchange = renderLista;
+  document.getElementById('filtro-cidade').onchange = renderLista;
+
+  const filtered = entries.filter(e=>
+    (!fMes || mesKey(e.data)===fMes) && (!fCidade || e.cidade===fCidade)
+  );
+
+  document.getElementById('st-total').textContent = filtered.length;
+  // Só dá pra somar a "medida" quando todos os registros do filtro usam a
+  // mesma unidade (m², m ou ha) — misturar unidades num total só não faz
+  // sentido, então nesse caso mostramos um rótulo genérico.
+  const medidos = filtered.filter(e=>!entryIsValorFixo(e));
+  const unidadesPresentes = new Set(medidos.map(e=>e.unidade || 'm²'));
+  document.getElementById('st-ext').textContent = medidos.reduce((s,e)=>s+(areaTotal(e)||0),0).toLocaleString('pt-BR');
+  document.getElementById('st-ext-label').textContent = unidadesPresentes.size === 1
+    ? [...unidadesPresentes][0] + ' medidos no mês'
+    : unidadesPresentes.size === 0
+      ? 'medidos no mês'
+      : 'medidos no mês (unidades variadas)';
+  document.getElementById('st-cidades').textContent = new Set(filtered.map(e=>e.cidade)).size;
+
+  const totalValorFixo = filtered.filter(e=>entryIsValorFixo(e)).reduce((s,e)=>s+(parseFloat(e.valor)||0),0);
+  const valorBox = document.getElementById('st-valor-box');
+  if(totalValorFixo > 0){
+    valorBox.style.display = '';
+    document.getElementById('st-valor').textContent = formatMoeda(totalValorFixo);
+  } else {
+    valorBox.style.display = 'none';
+  }
+
+  const container = document.getElementById('lista-registros');
+  if(filtered.length===0){
+    container.innerHTML = '<div class="empty">Nenhum registro ainda.<br>Vá em "+ Registro" para adicionar o primeiro.</div>';
+    return;
+  }
+  container.innerHTML = filtered.map(e=>`
+    <div class="entry">
+      <div class="entry-top">
+        <div>
+          <div class="entry-title">${enderecoCompleto(e)}</div>
+          <div class="entry-sub">${e.cidade} · ${e.data.split('-').reverse().join('/')}${e.criadoPor?' · lançado por '+e.criadoPor:''}</div>
+          <span class="badge">${e.servico}</span>
+        </div>
+      </div>
+      <div class="entry-sub" style="margin-top:8px;">${formatMedida(e)?formatMedida(e)+' · ':''}${e.equipe||''}</div>
+      ${e.obs?`<div class="entry-sub" style="margin-top:4px;">${e.obs}</div>`:''}
+      ${(e.fotoAntes||e.fotoDepois)?`<div class="entry-photos">
+        ${e.fotoAntes?`<img src="${fotoParaExibir(e,'fotoAntes')}" loading="lazy">`:''}
+        ${e.fotoDepois?`<img src="${fotoParaExibir(e,'fotoDepois')}" loading="lazy">`:''}
+      </div>`:''}
+      ${(souAdmin() || e.unidade !== 'R$') ? `
+      <div class="entry-actions">
+        <button class="edit" onclick="editarRegistro('${e.id}')">Editar</button>
+        <button class="del" onclick="excluirRegistro('${e.id}')">Excluir</button>
+      </div>
+      ` : ''}
+    </div>
+  `).join('');
+}
+
+// Quantidade medida do registro, na unidade do próprio serviço (denormalizada
+// no registro): "m" é só Extensão x Lados (sem largura, ex: meio-fio);
+// "m²" é Extensão x Largura x Lados; "ha" é a mesma conta de área, convertida
+// de m² para hectare (1 ha = 10.000 m²).
+function areaTotal(e){
+  const ext = parseFloat(e.extensao);
+  const larg = parseFloat(e.largura);
+  const lados = parseFloat(e.lados) || 1;
+  const unidade = e.unidade || 'm²';
+  if(unidade === 'm'){
+    if(!ext) return null;
+    return ext * lados;
+  }
+  if(!ext || !larg) return null;
+  const areaM2 = ext * larg * lados;
+  return unidade === 'ha' ? areaM2 / 10000 : areaM2;
+}
+
+function formatMoeda(v){
+  return (parseFloat(v)||0).toLocaleString('pt-BR', {style:'currency', currency:'BRL'});
+}
+
+function formatMedida(e){
+  if(entryIsValorFixo(e)){
+    return e.valor ? 'Custo mensal fixo: ' + formatMoeda(e.valor) : '';
+  }
+  if(!e.extensao) return '';
+  let parts = [e.extensao + ' m'];
+  if(e.largura) parts.push(e.largura + ' m largura');
+  parts.push((e.lados||1) + ' lado(s)');
+  let s = parts.join(' × ');
+  const area = areaTotal(e);
+  if(area !== null) s += ' = ' + area.toLocaleString('pt-BR') + ' ' + (e.unidade || 'm²') + ' medidos';
+  return s;
+}
+
+// ------------------------------- Metas ------------------------------------
+function weekRangeFromDate(dataStr){
+  const d = new Date(dataStr + 'T00:00:00Z');
+  const dayNum = (d.getUTCDay() + 6) % 7;
+  const monday = new Date(d);
+  monday.setUTCDate(d.getUTCDate() - dayNum);
+  const sunday = new Date(monday);
+  sunday.setUTCDate(monday.getUTCDate() + 6);
+  const fmt = x => x.toISOString().slice(0,10);
+  return { inicio: fmt(monday), fim: fmt(sunday) };
+}
+function formatPeriodoSemana(inicio, fim){
+  const fmt = s => s.split('-').reverse().join('/');
+  return fmt(inicio) + ' a ' + fmt(fim);
+}
+function mudarSemana(delta){
+  const input = document.getElementById('metas-data');
+  const cur = input.value || hoje();
+  const d = new Date(cur + 'T00:00:00Z');
+  d.setUTCDate(d.getUTCDate() + delta*7);
+  input.value = d.toISOString().slice(0,10);
+  renderMetas();
+}
+
+// Cada cidade tem seu próprio conjunto de metas. O administrador escolhe
+// qual cidade quer ver/editar; o encarregado só tem a própria cidade (fixa).
+function popularSelectMetaCidade(){
+  const sel = document.getElementById('metas-cidade');
+  if(souAdmin()){
+    const atual = sel.value;
+    if(CIDADES.length === 0){
+      sel.innerHTML = '<option value="">Nenhuma cidade cadastrada</option>';
+      sel.disabled = true;
+    } else {
+      sel.innerHTML = CIDADES.map(c=>`<option value="${c.nome}">${c.nome}</option>`).join('');
+      sel.disabled = false;
+      if(CIDADES.some(c=>c.nome===atual)) sel.value = atual;
+    }
+  } else {
+    const nome = CURRENT_USER.cidadeNome || '';
+    sel.innerHTML = nome ? `<option value="${nome}">${nome}</option>` : '<option value="">Nenhuma cidade atribuída</option>';
+    sel.value = nome;
+    sel.disabled = true;
+  }
+}
+
+async function salvarMeta(servico, valor){
+  const cidade = document.getElementById('metas-cidade').value;
+  if(!cidade) return;
+  try{
+    METAS = await api('PUT', '/api/metas', { cidade, servico, valor });
+  }catch(e){
+    alert('Não consegui salvar a meta. ' + e.message);
+  }
+  renderMetas();
+}
+
+async function renderMetas(){
+  const tarefas = [refreshEntries(), refreshServicos()];
+  if(souAdmin()) tarefas.push(refreshCidades());
+  await Promise.all(tarefas);
+  popularSelectMetaCidade();
+  const cidadeAtual = document.getElementById('metas-cidade').value;
+
+  const dataInput = document.getElementById('metas-data');
+  if(!dataInput.value) dataInput.value = hoje();
+  const { inicio, fim } = weekRangeFromDate(dataInput.value);
+  document.getElementById('metas-periodo').textContent = 'Semana: ' + formatPeriodoSemana(inicio, fim);
+
+  if(!cidadeAtual){
+    METAS = {};
+    document.getElementById('metas-lista').innerHTML = '<div class="empty">'+(souAdmin() ? 'Cadastre uma cidade na aba "Cidades" para definir metas.' : 'Você ainda não tem uma cidade atribuída. Fale com o administrador.')+'</div>';
+    return;
+  }
+  METAS = await api('GET', '/api/metas?cidade=' + encodeURIComponent(cidadeAtual));
+
+  const entries = ENTRIES.filter(e => e.data >= inicio && e.data <= fim && e.cidade === cidadeAtual);
+
+  if(SERVICOS.length === 0){
+    document.getElementById('metas-lista').innerHTML = '<div class="empty">Nenhum serviço cadastrado ainda.<br>Cadastre na aba "Serviços" para acompanhar metas.</div>';
+    return;
+  }
+
+  document.getElementById('metas-lista').innerHTML = SERVICOS.map(s=>{
+    const servico = s.nome;
+    const unidade = s.unidade;
+    const isValorFixo = unidade === 'R$';
+    const feitos = entries.filter(e => e.servico === servico);
+    const quantidade = isValorFixo
+      ? feitos.reduce((sum,e)=>sum+(parseFloat(e.valor)||0), 0)
+      : feitos.reduce((sum,e)=>sum+(areaTotal(e)||0), 0);
+    const metaVal = METAS[servico] || 0;
+    const pct = metaVal > 0 ? Math.min(100, (quantidade/metaVal)*100) : 0;
+    const atingiu = metaVal > 0 && quantidade >= metaVal;
+    const quantFmt = isValorFixo ? formatMoeda(quantidade) : quantidade.toLocaleString('pt-BR') + ' ' + unidade;
+    const metaFmt = isValorFixo ? formatMoeda(metaVal) : metaVal.toLocaleString('pt-BR') + ' ' + unidade;
+
+    return `
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
+        <b>${servico}</b>
+        ${atingiu ? '<span class="badge">✓ meta atingida</span>' : ''}
+      </div>
+      ${metaVal > 0 ? `
+        <div class="meta-bar-bg"><div class="meta-bar-fill" style="width:${pct}%;${atingiu?'background:var(--accent)':''}"></div></div>
+        <div class="entry-sub">${quantFmt} de ${metaFmt} (${pct.toFixed(0)}%)</div>
+      ` : `
+        <div class="entry-sub" style="margin-top:8px;">Feito na semana: ${quantFmt} · nenhuma meta definida</div>
+      `}
+      ${souAdmin() ? `
+      <label style="margin-top:10px;">Meta semanal (${unidade})</label>
+      <input type="number" min="0" step="${isValorFixo?'0.01':'1'}" value="${metaVal || ''}" placeholder="${isValorFixo?'Ex: 1500':'Ex: 3000'}" onchange="salvarMeta('${servico}', this.value)">
+      ` : ''}
+    </div>`;
+  }).join('');
+}
+
+// ------------------------------ Cidades ------------------------------------
+async function adicionarCidade(){
+  const input = document.getElementById('nova-cidade');
+  const nome = input.value.trim();
+  if(!nome) return;
+  const contrato = document.getElementById('nova-cidade-contrato').value.trim();
+  const responsavel = document.getElementById('nova-cidade-responsavel').value.trim();
+  const telefone = document.getElementById('nova-cidade-telefone').value.trim();
+  try{
+    CIDADES = await api('POST', '/api/cidades', { nome, contrato, responsavel, telefone });
+    input.value = '';
+    document.getElementById('nova-cidade-contrato').value = '';
+    document.getElementById('nova-cidade-responsavel').value = '';
+    document.getElementById('nova-cidade-telefone').value = '';
+    cidadeSelecionadaId = CIDADES.length ? CIDADES[CIDADES.length-1].id : null; // mostra a cidade recém-criada
+    await renderCidades();
+    popularSelectCidade();
+    toast('Cidade adicionada ✓');
+  }catch(e){
+    toast(e.message || 'Não consegui adicionar a cidade.');
+  }
+}
+
+// Salva a edição de um campo (contrato/responsável/telefone) direto na lista.
+async function atualizarCidade(id, campo, valor){
+  try{
+    CIDADES = await api('PUT', '/api/cidades/' + encodeURIComponent(id), { [campo]: valor });
+    toast('Salvo ✓');
+  }catch(e){
+    toast(e.message || 'Não consegui salvar.');
+  }
+}
+
+function removerCidade(id, nome){
+  confirmarAcao('Remover "'+nome+'" da lista de cidades cadastradas? Os registros já salvos com essa cidade não são apagados.', async ()=>{
+    CIDADES = await api('DELETE', '/api/cidades/' + encodeURIComponent(id));
+    await renderCidades();
+    popularSelectCidade();
+  });
+}
+
+function formatDataHora(iso){
+  if(!iso) return '';
+  const d = new Date(iso);
+  return d.toLocaleDateString('pt-BR');
+}
+
+function renderDocumentosCidade(c){
+  const docs = c.documentos || [];
+  const lista = docs.length===0
+    ? '<div class="entry-sub" style="margin:4px 0 8px;">Nenhum documento anexado ainda.</div>'
+    : docs.map(d=>`
+      <div class="entry" style="padding:10px 12px;margin-bottom:6px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
+          <div>
+            <span class="badge" style="margin-top:0;">${d.tipo==='aditivo'?'Aditivo':'Contrato'}</span>
+            <div style="font-size:13px;font-weight:700;margin-top:4px;">${d.titulo || (d.tipo==='aditivo'?'Aditivo de contrato':'Contrato')}</div>
+            <div class="entry-sub">${formatDataHora(d.criadoEm)}${d.criadoPor?' · anexado por '+d.criadoPor:''}</div>
+          </div>
+          <div style="display:flex;gap:6px;flex:none;">
+            <a href="${d.url}" target="_blank" rel="noopener" style="display:inline-block;padding:8px 10px;font-size:12px;border-radius:7px;border:1px solid var(--border);background:#fff;color:var(--text);font-weight:700;text-decoration:none;">Ver</a>
+            <button onclick="removerDocumento('${c.id}','${d.id}')" style="padding:8px 10px;font-size:12px;border-radius:7px;border:1px solid #F1D1CC;background:#fff;color:var(--danger);font-weight:700;">Remover</button>
+          </div>
+        </div>
+      </div>
+    `).join('');
+
+  return `
+    <label style="margin-top:14px;">Documentos (Contrato e Aditivos)</label>
+    ${lista}
+    <div class="row2" style="margin-top:4px;">
+      <div>
+        <select id="doc-tipo-${c.id}">
+          <option value="contrato">Contrato</option>
+          <option value="aditivo">Aditivo de contrato</option>
+        </select>
+      </div>
+      <div>
+        <input type="text" id="doc-titulo-${c.id}" placeholder="Título (opcional)">
+      </div>
+    </div>
+    <input type="file" accept="application/pdf,image/*" id="doc-arquivo-${c.id}" style="margin-top:8px;">
+    <button class="btn btn-outline" style="margin-top:8px;" onclick="anexarDocumento('${c.id}')">📎 Anexar</button>
+  `;
+}
+
+function renderRuasCidade(c, ruas){
+  const semRuas = ruas.length === 0;
+  const options = semRuas
+    ? '<option value="">Nenhuma rua cadastrada</option>'
+    : ruas.map(r=>`<option value="${r.id}" data-nome="${r.nome.replace(/"/g,'&quot;')}">${r.nome}${r.bairro?' - '+r.bairro:''}${r.numero?' (nº '+r.numero+')':''}</option>`).join('');
+
+  return `
+    <label style="margin-top:14px;">Ruas cadastradas</label>
+    <select id="rua-select-${c.id}" ${semRuas?'disabled':''}>${options}</select>
+    <button onclick="removerRuaSelecionada('${c.id}')" ${semRuas?'disabled':''} style="width:100%;padding:11px;border-radius:9px;border:1px solid #F1D1CC;background:#fff;color:var(--danger);font-weight:700;margin-top:8px;cursor:pointer;">Remover rua selecionada</button>
+
+    <div class="row2" style="margin-top:14px;">
+      <div>
+        <input type="text" id="rua-nome-${c.id}" placeholder="Nome da rua">
+      </div>
+      <div>
+        <input type="text" id="rua-numero-${c.id}" placeholder="Número (opcional)">
+      </div>
+    </div>
+    <input type="text" id="rua-bairro-${c.id}" placeholder="Bairro (opcional)" style="margin-top:8px;" onkeydown="if(event.key==='Enter'){event.preventDefault();adicionarRua('${c.id}');}">
+    <button class="btn btn-outline" style="margin-top:8px;" onclick="adicionarRua('${c.id}')">+ Adicionar rua</button>
+    <div class="note" style="margin-top:6px;">As ruas cadastradas aqui aparecem para o encarregado escolher em "+ Registro" — ele só seleciona, não digita, para manter a lista padronizada.</div>
+  `;
+}
+
+async function adicionarRua(cidadeId){
+  const nomeInput = document.getElementById('rua-nome-'+cidadeId);
+  const numeroInput = document.getElementById('rua-numero-'+cidadeId);
+  const bairroInput = document.getElementById('rua-bairro-'+cidadeId);
+  const nome = nomeInput.value.trim();
+  if(!nome){ toast('Informe o nome da rua.'); return; }
+  const numero = numeroInput.value.trim();
+  const bairro = bairroInput.value.trim();
+  try{
+    await api('POST', '/api/ruas', { cidadeId, nome, numero, bairro });
+    nomeInput.value=''; numeroInput.value=''; bairroInput.value='';
+    await renderCidades();
+    toast('Rua adicionada ✓');
+  }catch(e){
+    toast(e.message || 'Não consegui adicionar a rua.');
+  }
+}
+
+function removerRua(cidadeId, ruaId, nome){
+  confirmarAcao('Remover a rua "'+nome+'" da lista? Registros já salvos com essa rua não são apagados.', async ()=>{
+    try{
+      await api('DELETE', '/api/ruas/' + encodeURIComponent(ruaId));
+      await renderCidades();
+    }catch(e){
+      toast(e.message || 'Não consegui remover a rua.');
+    }
+  });
+}
+
+function removerRuaSelecionada(cidadeId){
+  const sel = document.getElementById('rua-select-'+cidadeId);
+  const ruaId = sel.value;
+  if(!ruaId) return;
+  const nome = sel.options[sel.selectedIndex].dataset.nome || sel.options[sel.selectedIndex].text;
+  removerRua(cidadeId, ruaId, nome);
+}
+
+let cidadeSelecionadaId = null; // cidade em foco na aba Cidades (escolhida no select)
+
+function selecionarCidade(id){
+  cidadeSelecionadaId = id;
+  renderCidades();
+}
+
+function removerCidadeSelecionada(){
+  const c = CIDADES.find(x=>x.id===cidadeSelecionadaId);
+  if(!c) return;
+  removerCidade(c.id, c.nome);
+}
+
+async function renderCidades(){
+  await refreshCidades();
+  let todasRuas = [];
+  try{ todasRuas = await api('GET', '/api/ruas'); }catch(e){ todasRuas = []; }
+  const container = document.getElementById('cidades-lista');
+  if(CIDADES.length===0){
+    cidadeSelecionadaId = null;
+    container.innerHTML = '<div class="empty">Nenhuma cidade cadastrada ainda.<br>Adicione acima as cidades onde a empresa atua.</div>';
+    return;
+  }
+  if(!cidadeSelecionadaId || !CIDADES.some(c=>c.id===cidadeSelecionadaId)){
+    cidadeSelecionadaId = CIDADES[0].id;
+  }
+  const opcoesCidade = CIDADES.map(c=>`<option value="${c.id}" ${c.id===cidadeSelecionadaId?'selected':''}>${c.nome}</option>`).join('');
+  const c = CIDADES.find(x=>x.id===cidadeSelecionadaId);
+  const ruasDaCidade = todasRuas.filter(r=>r.cidadeId===c.id);
+
+  container.innerHTML = `
+    <div class="card">
+      <label>Cidades cadastradas</label>
+      <select id="cidade-select" onchange="selecionarCidade(this.value)">${opcoesCidade}</select>
+      <button onclick="removerCidadeSelecionada()" style="width:100%;padding:11px;border-radius:9px;border:1px solid #F1D1CC;background:#fff;color:var(--danger);font-weight:700;margin-top:8px;cursor:pointer;">Remover cidade selecionada</button>
+    </div>
+    <div class="entry">
+      <div class="entry-top">
+        <div class="entry-title">${c.nome}</div>
+      </div>
+      <label style="margin-top:10px;">Contrato / Nº processo</label>
+      <input type="text" value="${c.contrato||''}" placeholder="Ex: Contrato 012/2026" onchange="atualizarCidade('${c.id}','contrato',this.value)">
+      <label>Responsável / encarregado fixo</label>
+      <input type="text" value="${c.responsavel||''}" placeholder="Ex: Carlos" onchange="atualizarCidade('${c.id}','responsavel',this.value)">
+      <label>Telefone de contato</label>
+      <input type="text" value="${c.telefone||''}" placeholder="Ex: (11) 98888-7777" onchange="atualizarCidade('${c.id}','telefone',this.value)">
+      ${renderDocumentosCidade(c)}
+      ${renderRuasCidade(c, ruasDaCidade)}
+    </div>
+  `;
+}
+
+async function anexarDocumento(cidadeId){
+  const tipoSel = document.getElementById('doc-tipo-'+cidadeId);
+  const tituloInput = document.getElementById('doc-titulo-'+cidadeId);
+  const fileInput = document.getElementById('doc-arquivo-'+cidadeId);
+  const file = fileInput.files[0];
+  if(!file){ toast('Escolha um arquivo (PDF ou imagem) para anexar.'); return; }
+  const tipo = tipoSel.value;
+  const titulo = tituloInput.value.trim();
+  const reader = new FileReader();
+  reader.onload = async (e)=>{
+    try{
+      CIDADES = await api('POST', '/api/cidades/'+encodeURIComponent(cidadeId)+'/documentos', {
+        tipo, titulo, nomeArquivo: file.name, arquivo: e.target.result
+      });
+      toast('Documento anexado ✓');
+      await renderCidades();
+    }catch(err){
+      toast(err.message || 'Não consegui anexar o documento.');
+    }
+  };
+  reader.readAsDataURL(file);
+}
+
+function removerDocumento(cidadeId, docId){
+  confirmarAcao('Remover este documento? Essa ação não pode ser desfeita.', async ()=>{
+    try{
+      CIDADES = await api('DELETE', '/api/cidades/'+encodeURIComponent(cidadeId)+'/documentos/'+encodeURIComponent(docId));
+      await renderCidades();
+    }catch(e){
+      toast(e.message || 'Não consegui remover o documento.');
+    }
+  });
+}
+
+// ------------------------------ Serviços ------------------------------------
+// A aba Serviços agora é organizada por CIDADE, não por serviço: cada cidade
+// tem seu próprio contrato, então o mesmo serviço pode custar um valor
+// diferente (ou nem existir) em cada cidade. O admin escolhe a cidade e
+// cadastra ali o valor de cada serviço que ela usa — serviço sem valor
+// cadastrado numa cidade simplesmente não aparece pra lançar registro lá
+// (ver servicoDisponivelNaCidade()).
+let cidadeServicosSelId = null; // cidade em foco na aba Serviços (escolhida no select)
+
+function selecionarCidadeServicos(id){
+  cidadeServicosSelId = id;
+  renderServicos();
+}
+
+async function adicionarServico(){
+  const nomeInput = document.getElementById('novo-servico-nome');
+  const nome = nomeInput.value.trim();
+  if(!nome) return;
+  const unidade = document.getElementById('novo-servico-unidade').value;
+  try{
+    SERVICOS = await api('POST', '/api/servicos', { nome, unidade });
+    nomeInput.value = '';
+    await renderServicos();
+    popularSelectServico();
+    toast('Serviço adicionado ✓ — agora cadastre o valor dele em cada cidade que vai usá-lo, logo abaixo.');
+  }catch(e){
+    toast(e.message || 'Não consegui adicionar o serviço.');
+  }
+}
+
+async function atualizarServicoUnidade(id, unidade){
+  try{
+    SERVICOS = await api('PUT', '/api/servicos/' + encodeURIComponent(id), { unidade });
+    toast('Salvo ✓');
+    popularSelectServico();
+    await renderServicos();
+  }catch(e){
+    toast(e.message || 'Não consegui salvar.');
+  }
+}
+
+// Valor específico de um serviço numa cidade — é o único valor que existe
+// agora (não tem mais "valor padrão" geral); em branco = a cidade não usa
+// esse serviço, e ele some do "+ Registro" pra quem lança nessa cidade.
+async function salvarPrecoCidade(servicoId, cidadeId){
+  const input = document.getElementById('preco-'+servicoId+'-'+cidadeId);
+  const valor = input.value;
+  try{
+    SERVICOS = await api('PUT', '/api/servicos/' + encodeURIComponent(servicoId), { precoCidadeId: cidadeId, precoValor: valor });
+    toast(valor === '' ? 'Serviço removido dessa cidade ✓' : 'Valor salvo ✓');
+    popularSelectServico();
+  }catch(e){
+    toast(e.message || 'Não consegui salvar o valor dessa cidade.');
+  }
+}
+
+function removerServico(id, nome){
+  confirmarAcao('Remover "'+nome+'" da lista de serviços (de todas as cidades)? Registros já salvos com esse serviço não são apagados, mas a meta definida para ele será removida.', async ()=>{
+    try{
+      SERVICOS = await api('DELETE', '/api/servicos/' + encodeURIComponent(id));
+      await renderServicos();
+      popularSelectServico();
+    }catch(e){
+      toast(e.message || 'Não consegui remover o serviço.');
+    }
+  });
+}
+
+async function renderServicos(){
+  await refreshServicos();
+  await refreshCidades();
+  const container = document.getElementById('servicos-lista');
+
+  if(CIDADES.length === 0){
+    container.innerHTML = '<div class="empty">Cadastre uma cidade na aba "Cidades" primeiro — cada serviço tem um valor por cidade, então é preciso ter ao menos uma cidade cadastrada.</div>';
+    return;
+  }
+  if(!cidadeServicosSelId || !CIDADES.some(c=>c.id===cidadeServicosSelId)){
+    cidadeServicosSelId = CIDADES[0].id;
+  }
+  const cidadeSel = CIDADES.find(c=>c.id===cidadeServicosSelId);
+  const opcoesCidade = CIDADES.map(c=>`<option value="${c.id}" ${c.id===cidadeServicosSelId?'selected':''}>${c.nome}</option>`).join('');
+
+  const blocoValoresPorCidade = SERVICOS.length === 0
+    ? '<div class="note">Nenhum serviço cadastrado ainda — adicione um acima primeiro.</div>'
+    : SERVICOS.map(s=>{
+        const valorAtual = (s.precosPorCidade && s.precosPorCidade[cidadeSel.id] !== undefined && s.precosPorCidade[cidadeSel.id] !== null) ? s.precosPorCidade[cidadeSel.id] : '';
+        return `
+        <div style="display:flex;gap:8px;align-items:center;margin-top:10px;border-top:1px solid #E2E5EA;padding-top:10px;">
+          <div style="flex:1;">
+            <div style="font-weight:700;">${s.nome}</div>
+            <div style="font-size:12px;color:#6B7280;">${s.unidade === 'R$' ? 'valor fixo mensal' : 'valor por ' + s.unidade}</div>
+          </div>
+          <input type="number" step="0.01" min="0" style="width:110px;margin:0;" id="preco-${s.id}-${cidadeSel.id}" value="${valorAtual}" placeholder="sem valor">
+          <button class="btn btn-outline" style="width:auto;margin:0;padding:9px 12px;font-size:12.5px;" onclick="salvarPrecoCidade('${s.id}','${cidadeSel.id}')">Salvar</button>
+        </div>`;
+      }).join('');
+
+  const listaTodosServicos = SERVICOS.length === 0 ? '' : `
+    <div class="card">
+      <label>Todos os serviços cadastrados</label>
+      <div class="note">Aqui é só o cadastro geral (nome e unidade) — o valor de cada um é definido por cidade, no bloco acima.</div>
+      ${SERVICOS.map(s=>`
+        <div style="margin-top:10px;border-top:1px solid #E2E5EA;padding-top:10px;">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
+            <span style="font-weight:700;">${s.nome}</span>
+            <button class="btn btn-outline" style="width:auto;margin:0;padding:6px 12px;font-size:12.5px;color:var(--danger);" onclick="removerServico('${s.id}','${s.nome}')">Remover</button>
+          </div>
+          <select style="margin-top:6px;" onchange="atualizarServicoUnidade('${s.id}', this.value)">
+            <option value="m²" ${s.unidade==='m²'?'selected':''}>m² — área (extensão × largura)</option>
+            <option value="m" ${s.unidade==='m'?'selected':''}>m — comprimento linear (só extensão)</option>
+            <option value="ha" ${s.unidade==='ha'?'selected':''}>ha — área em hectares (extensão × largura)</option>
+            <option value="R$" ${s.unidade==='R$'?'selected':''}>R$ — valor fixo mensal</option>
+          </select>
+        </div>
+      `).join('')}
+      <div class="note" style="margin-top:8px;">O nome do serviço não pode ser alterado depois de cadastrado, para não desalinhar dos registros e metas já lançados. Para corrigir o nome, cadastre um novo serviço e remova este.</div>
+    </div>
+  `;
+
+  container.innerHTML = `
+    <div class="card">
+      <label>Cidade</label>
+      <select id="servico-cidade-select" onchange="selecionarCidadeServicos(this.value)">${opcoesCidade}</select>
+      <div class="note" style="margin-top:6px;">Cada cidade tem seu próprio contrato — escolha a cidade pra ver e cadastrar o valor de cada serviço nela. Um serviço só aparece pra lançar registro nas cidades onde ele tiver um valor cadastrado.</div>
+    </div>
+    <div class="entry">
+      <div class="entry-top">
+        <div class="entry-title">Valores em ${cidadeSel.nome}</div>
+      </div>
+      ${blocoValoresPorCidade}
+    </div>
+    ${listaTodosServicos}
+  `;
+}
+
+// ------------------------------ Usuários (admin) ----------------------------
+function toggleUsCidade(){
+  const isAdmin = document.getElementById('us-role').value === 'admin';
+  document.getElementById('grp-us-cidade').style.display = isAdmin ? 'none' : '';
+}
+
+function popularSelectUsCidade(){
+  const sel = document.getElementById('us-cidade');
+  const atual = sel.value;
+  sel.innerHTML = '<option value="">Selecione a cidade...</option>' + CIDADES.map(c=>`<option value="${c.id}">${c.nome}</option>`).join('');
+  if(CIDADES.some(c=>c.id===atual)) sel.value = atual;
+}
+
+async function adicionarUsuario(){
+  const nome = document.getElementById('us-nome').value.trim();
+  const usuario = document.getElementById('us-usuario').value.trim();
+  const senha = document.getElementById('us-senha').value;
+  const role = document.getElementById('us-role').value;
+  const cidadeId = document.getElementById('us-cidade').value;
+  if(!nome || !usuario || senha.length < 4){
+    toast('Preencha nome, usuário e uma senha com pelo menos 4 caracteres.');
+    return;
+  }
+  try{
+    await api('POST', '/api/users', { nome, usuario, senha, role, cidadeId });
+    document.getElementById('us-nome').value = '';
+    document.getElementById('us-usuario').value = '';
+    document.getElementById('us-senha').value = '';
+    document.getElementById('us-role').value = 'encarregado';
+    document.getElementById('us-cidade').value = '';
+    toggleUsCidade();
+    await renderUsuarios();
+    toast('Usuário criado ✓');
+  }catch(e){
+    toast(e.message || 'Não consegui criar o usuário.');
+  }
+}
+
+function removerUsuario(id, nome){
+  confirmarAcao('Remover o acesso de "'+nome+'"? A pessoa não vai mais conseguir entrar no app.', async ()=>{
+    try{
+      await api('DELETE', '/api/users/' + encodeURIComponent(id));
+      await renderUsuarios();
+    }catch(e){
+      toast(e.message || 'Não consegui remover o usuário.');
+    }
+  });
+}
+
+async function atualizarUsuarioCidade(id, cidadeId){
+  try{
+    await api('PUT', '/api/users/' + encodeURIComponent(id), { cidadeId: cidadeId || null });
+    toast('Cidade atualizada ✓');
+  }catch(e){
+    toast(e.message || 'Não consegui atualizar.');
+  }
+}
+
+async function renderUsuarios(){
+  if(!souAdmin()) return;
+  await refreshCidades();
+  popularSelectUsCidade();
+  const usuarios = await api('GET', '/api/users');
+  const container = document.getElementById('usuarios-lista');
+  container.innerHTML = usuarios.map(u=>`
+    <div class="entry">
+      <div class="entry-top">
+        <div>
+          <div class="entry-title">${u.nome}</div>
+          <div class="entry-sub">usuário: ${u.usuario}</div>
+          <span class="badge">${u.role === 'admin' ? 'Administrador' : 'Encarregado'}</span>
+        </div>
+      </div>
+      ${u.role === 'admin' ? '' : `
+        <label style="margin-top:10px;">Cidade atribuída</label>
+        <select onchange="atualizarUsuarioCidade('${u.id}', this.value)">
+          <option value="">Nenhuma cidade atribuída</option>
+          ${CIDADES.map(c=>`<option value="${c.id}" ${c.id===u.cidadeId?'selected':''}>${c.nome}</option>`).join('')}
+        </select>
+      `}
+      <div class="entry-actions">
+        <button class="del" onclick="removerUsuario('${u.id}', '${u.nome.replace(/'/g,"\\'")}')">Remover acesso</button>
+      </div>
+    </div>
+  `).join('');
+}
+
+// ------------------------------ Exportar ------------------------------------
+async function salvarConfig(){
+  try{
+    CONFIG = await api('PUT', '/api/config', {
+      empresa: document.getElementById('cfg-empresa').value.trim(),
+      cnpj: document.getElementById('cfg-cnpj').value.trim(),
+      contrato: document.getElementById('cfg-contrato').value.trim()
+    });
+  }catch(e){
+    toast('Não consegui salvar a identificação. ' + e.message);
+  }
+}
+
+async function renderFiltrosExport(){
+  await Promise.all([refreshEntries(), refreshConfig()]);
+  popularFiltros();
+  atualizarAvisoOtimizacao();
+}
+
+// ------------------------ Baixar fotos em ZIP ------------------------------
+function baixarFotosZip(){
+  if(!souAdmin()){ alert('Apenas o administrador pode baixar as fotos.'); return; }
+  const { filtro } = filtroPeriodoExport();
+  const cidade = document.getElementById('exp-cidade').value;
+  const comFoto = ENTRIES.filter(e=>filtro(e) && (!cidade || e.cidade===cidade) && (e.fotoAntes || e.fotoDepois));
+  if(comFoto.length===0){ alert('Nenhuma foto encontrada para esse filtro.'); return; }
+
+  const params = new URLSearchParams();
+  if(cidade) params.set('cidade', cidade);
+  const inicio = document.getElementById('exp-data-inicio').value;
+  const fim = document.getElementById('exp-data-fim').value;
+  if(inicio || fim){
+    if(inicio) params.set('inicio', inicio);
+    if(fim) params.set('fim', fim);
+  } else {
+    const mes = document.getElementById('exp-mes').value;
+    if(mes) params.set('mes', mes);
+  }
+  const a = document.createElement('a');
+  a.href = '/api/exportar/fotos.zip?' + params.toString();
+  a.download = '';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  toast('Preparando o ZIP com ' + comFoto.length + ' registro(s) com foto — o download começa em instantes.');
+}
+
+// ----------------- Otimizar fotos antigas (criar miniaturas) ----------------
+// Fotos cadastradas antes das miniaturas existirem só têm a versão grande
+// (e as de antes da compressão podem ter vários MB). Aqui o próprio
+// navegador do administrador baixa cada uma, gera a miniatura leve (e, se a
+// foto for muito pesada, uma versão completa comprimida) e manda de volta
+// pro servidor. Só precisa rodar uma vez — as fotos novas já nascem com
+// miniatura.
+function fotosPendentesDeOtimizar(){
+  const pend = [];
+  for(const e of ENTRIES){
+    if(e.fotoAntes && !e.fotoAntesMini) pend.push({ e, campo:'fotoAntes' });
+    if(e.fotoDepois && !e.fotoDepoisMini) pend.push({ e, campo:'fotoDepois' });
+  }
+  return pend;
+}
+
+let otimizandoFotos = false;
+function atualizarAvisoOtimizacao(){
+  const card = document.getElementById('card-otimizar-fotos');
+  if(!card) return;
+  if(!souAdmin()){ card.classList.add('hidden'); return; }
+  const pend = fotosPendentesDeOtimizar();
+  if(pend.length === 0 && !otimizandoFotos){ card.classList.add('hidden'); return; }
+  card.classList.remove('hidden');
+  if(!otimizandoFotos){
+    document.getElementById('otimizar-fotos-texto').innerHTML =
+      'Existem <b>' + pend.length + ' foto(s) antiga(s)</b> sem a versão leve usada no relatório fotográfico — por isso ele demora pra carregar. ' +
+      'Toque no botão abaixo uma única vez (de preferência no computador ou no Wi-Fi) e deixe esta tela aberta até terminar.';
+  }
+}
+
+async function otimizarFotosAntigas(){
+  if(otimizandoFotos) return;
+  const pend = fotosPendentesDeOtimizar();
+  if(pend.length === 0){ atualizarAvisoOtimizacao(); return; }
+  otimizandoFotos = true;
+  const btn = document.getElementById('btn-otimizar-fotos');
+  const prog = document.getElementById('otimizar-fotos-progresso');
+  btn.disabled = true;
+  let ok = 0, falhas = 0;
+  for(let i = 0; i < pend.length; i++){
+    const { e, campo } = pend[i];
+    prog.textContent = 'Otimizando foto ' + (i+1) + ' de ' + pend.length + '... não feche esta tela.';
+    try{
+      const resp = await fetch(e[campo], { credentials:'same-origin' });
+      if(!resp.ok) throw new Error('foto não encontrada');
+      const blob = await resp.blob();
+      const bitmap = await carregarBitmap(blob);
+      const corpo = {};
+      corpo[campo + 'Mini'] = redimensionarBitmap(bitmap, MINI_LADO, MINI_QUALIDADE);
+      // Foto grande demais (de antes da compressão): troca também a
+      // versão completa por uma comprimida, igual as fotos novas.
+      if(blob.size > 900 * 1024 || Math.max(bitmap.width, bitmap.height) > 1600){
+        corpo[campo] = redimensionarBitmap(bitmap, 1600, 0.72);
+      }
+      const atualizado = await api('PUT', '/api/entries/' + encodeURIComponent(e.id) + '/otimizar-fotos', corpo);
+      Object.assign(e, atualizado);
+      ok++;
+    }catch(err){
+      falhas++;
+    }
+  }
+  otimizandoFotos = false;
+  btn.disabled = false;
+  prog.textContent = 'Pronto! ' + ok + ' foto(s) otimizada(s)' + (falhas ? ' — ' + falhas + ' não puderam ser otimizadas (arquivo não encontrado ou corrompido).' : '.');
+  await refreshEntries();
+  atualizarAvisoOtimizacao();
+  if(fotosPendentesDeOtimizar().length === 0) toast('Fotos otimizadas ✓ — o relatório fotográfico agora abre bem mais rápido.');
+}
+
+function csvEscape(v){
+  v = String(v ?? '');
+  if(v.includes(';') || v.includes('"') || v.includes('\n')){
+    v = '"' + v.replace(/"/g,'""') + '"';
+  }
+  return v;
+}
+
+function exportarCSV(){
+  const { filtro } = filtroPeriodoExport();
+  const cidade = document.getElementById('exp-cidade').value;
+  const entries = ENTRIES.filter(e=>filtro(e) && (!cidade || e.cidade===cidade))
+    .sort((a,b)=>(a.cidade||'').localeCompare(b.cidade||'') || (a.data||'').localeCompare(b.data||''));
+  if(entries.length===0){ alert('Nenhum registro para esse filtro.'); return; }
+
+  const cols = ['Cidade','Rua','Extensão (m)','Largura (m)','Lados','Quantidade Medida','Unidade','Valor (R$)','Serviço','Data','Equipe','Observações'];
+  const linhas = [cols.join(';')];
+  entries.forEach(e=>{
+    const isValorFixo = entryIsValorFixo(e);
+    const area = areaTotal(e);
+    linhas.push([
+      csvEscape(e.cidade), csvEscape(enderecoCompleto(e)),
+      isValorFixo?'':csvEscape(e.extensao), isValorFixo?'':csvEscape(e.largura), isValorFixo?'':csvEscape(e.lados),
+      isValorFixo?'':(area===null?'':String(area).replace('.',',')),
+      isValorFixo?'':csvEscape(e.unidade||'m²'),
+      isValorFixo?String(parseFloat(e.valor)||0).replace('.',','):'',
+      csvEscape(e.servico), e.data.split('-').reverse().join('/'), csvEscape(e.equipe), csvEscape(e.obs)
+    ].join(';'));
+  });
+  const blob = new Blob(['﻿'+linhas.join('\n')], {type:'text/csv;charset=utf-8'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'medicao_' + periodoSlugExport() + slugCidadeArquivo(cidade) + '.csv';
+  a.click();
+  toast('Planilha exportada ✓');
+}
+
+// Nome de arquivo amigável quando um filtro de cidade está ativo (ex:
+// "medicao_2026-08_sao-jose-do-rio-preto.csv").
+function slugCidadeArquivo(cidade){
+  if(!cidade) return '';
+  return '_' + cidade.normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/[^a-zA-Z0-9]+/g,'-').replace(/^-+|-+$/g,'').toLowerCase();
+}
+
+// Número de contrato a mostrar no relatório: se uma cidade específica foi
+// escolhida no filtro, usa o contrato cadastrado para ELA (aba Cidades);
+// sem isso — ou em "Todas as cidades", que mistura várias — cai no campo
+// geral "Contrato / Nº Processo" da aba Exportar.
+function contratoParaRelatorio(cidadeFiltro){
+  if(cidadeFiltro){
+    if(souAdmin()){
+      const c = CIDADES.find(c=>c.nome === cidadeFiltro);
+      if(c && c.contrato) return c.contrato;
+    } else if(CURRENT_USER.cidadeNome === cidadeFiltro && CURRENT_USER.cidadeContrato){
+      return CURRENT_USER.cidadeContrato;
+    }
+  }
+  return CONFIG.contrato || '';
+}
+
+function exportarMedicao(){
+ try {
+  // Relatório de Medição mostra valores de cobrança — acesso restrito ao
+  // administrador (a aba Exportar já fica escondida pra quem não é admin;
+  // essa checagem é só uma segunda trava).
+  if(!souAdmin()){ alert('Apenas o administrador tem acesso a este relatório.'); return; }
+  const { filtro, label } = filtroPeriodoExport();
+  const cidadeFiltro = document.getElementById('exp-cidade').value;
+  // Agrupado por serviço (e dentro de cada serviço, por cidade/rua) — assim
+  // fica fácil ver e conferir o total de cada serviço, com uma linha de
+  // subtotal logo depois do último lançamento daquele serviço.
+  const entries = ENTRIES.filter(e=>filtro(e) && (!cidadeFiltro || e.cidade===cidadeFiltro))
+    .sort((a,b)=>(a.servico||'').localeCompare(b.servico||'') || (a.cidade||'').localeCompare(b.cidade||'') || (a.rua||'').localeCompare(b.rua||''));
+  if(entries.length===0){ alert('Nenhum registro para esse filtro.'); return; }
+
+  const cfg = CONFIG;
+  const cidades = [...new Set(entries.map(e=>e.cidade))].join(', ');
+  const datasOrdenadas = entries.map(e=>e.data).sort();
+  const periodo = datasOrdenadas.length ? datasOrdenadas[0].split('-').reverse().join('/') + ' a ' + datasOrdenadas[datasOrdenadas.length-1].split('-').reverse().join('/') : '';
+
+  // Valor final de um lançamento: para serviço "R$" (custo fixo mensal) é o
+  // valor digitado direto no registro; para os demais, é a quantidade medida
+  // (área ou comprimento) vezes o valor por unidade cadastrado na aba
+  // Serviços — assim o relatório já sai com quanto tem a receber por serviço.
+  function valorCalculadoEntry(e){
+    if(entryIsValorFixo(e)) return parseFloat(e.valor)||0;
+    const area = areaTotal(e);
+    return area === null ? 0 : area * valorUnitarioDoServico(e.servico, e.cidade);
+  }
+
+  const totalValor = entries.reduce((s,e)=>s+valorCalculadoEntry(e),0);
+  // A linha TOTAL GERAL da tabela detalhada não soma mais a "quantidade
+  // medida" (metragem) de todos os serviços juntos — somar metragens de
+  // serviços diferentes (ex: m² de capina + m de meio-fio) não faz sentido,
+  // e mesmo quando bate a mesma unidade o total de cada serviço já aparece
+  // certinho no subtotal logo abaixo dele e na tabela "Resumo por Serviço".
+
+  const win = window.open('', '_blank');
+  if(!win){ alert('O navegador bloqueou a abertura da medição.\n\nToque em "Gerar Medição" novamente ou, se aparecer um aviso de pop-up bloqueado, toque nele e escolha "Permitir".'); return; }
+  let html = `<!DOCTYPE html><html lang="pt-BR"><head><meta charset="UTF-8"><title>Medição Mensal — ${label}</title>
+  <style>
+    @page { size: A4 landscape; margin: 14mm 12mm; }
+    *{box-sizing:border-box;}
+    body{font-family:Arial,Helvetica,sans-serif;color:#1E2430;margin:0;padding:20px;background:#fff;}
+    .letterhead{display:flex;justify-content:space-between;align-items:flex-end;border-bottom:3px solid #00632B;padding-bottom:12px;margin-bottom:14px;}
+    .letterhead .brand{display:flex;align-items:center;gap:12px;}
+    .letterhead .brand img{width:48px;height:48px;object-fit:contain;}
+    .letterhead h1{font-size:13px;color:#00632B;margin:0 0 3px;letter-spacing:.3px;}
+    .letterhead .empresa{font-size:18px;color:#00632B;font-weight:700;letter-spacing:.2px;}
+    .letterhead .cnpj{font-size:10px;color:#9AA4B2;}
+    .letterhead .pagerinfo{font-size:11px;color:#6B7280;text-align:right;}
+    .identificacao{display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:6px 20px;background:#F4F6F8;border:1px solid #E2E5EA;border-radius:8px;padding:10px 16px;margin-bottom:16px;font-size:11.5px;}
+    .identificacao div{display:flex;justify-content:space-between;border-bottom:1px dotted #C7CDD6;padding:2px 0;}
+    .identificacao b{color:#00632B;font-weight:700;}
+    table{width:100%;border-collapse:collapse;margin-bottom:22px;}
+    th{background:#00632B;color:#fff;font-size:10px;text-align:center;padding:6px 5px;border:1px solid #00632B;}
+    td{font-size:10px;padding:5px;border:1px solid #E2E5EA;text-align:center;}
+    td.left{text-align:left;}
+    tfoot td{font-weight:700;background:#E6F0EA;border-top:2px solid #00632B;}
+    h2.secao{font-size:13px;color:#00632B;margin:0 0 8px;}
+    thead{display:table-header-group;}
+    tr{page-break-inside:avoid;}
+    .voltar-bar{position:sticky;top:0;background:#00632B;color:#fff;padding:10px 14px;display:flex;align-items:center;justify-content:space-between;gap:10px;margin:-20px -20px 16px;font-size:12.5px;z-index:10;}
+    .voltar-bar button{background:#fff;color:#00632B;border:none;border-radius:6px;padding:8px 14px;font-weight:700;font-size:13px;cursor:pointer;white-space:nowrap;}
+    @media print { body{padding:0;} .voltar-bar{display:none;} }
+  </style></head><body>
+
+  <div class="voltar-bar">
+    <span>Pronto! Use "Imprimir → Salvar como PDF" pra baixar.</span>
+    <button onclick="window.close(); setTimeout(function(){ alert('Se a aba não fechou sozinha, troque de aba ou toque em voltar no navegador pra retornar ao app.'); }, 400);">← Voltar pro app</button>
+  </div>
+
+  <div class="letterhead">
+    <div class="brand">
+      <img src="/img/logo.jpg" alt="Logo">
+      <div>
+        <div class="empresa">${cfg.empresa || '[Nome da Construtora]'}</div>
+        <h1>Medição Mensal de Serviços — Limpeza Urbana</h1>
+        <div class="cnpj">${cfg.cnpj || ''}</div>
+      </div>
+    </div>
+    <div class="pagerinfo">Documento de medição para faturamento</div>
+  </div>
+
+  <div class="identificacao">
+    <div><b>Mês de Referência</b> <span>${label}</span></div>
+    <div><b>Contrato / Nº Processo</b> <span>${contratoParaRelatorio(cidadeFiltro) || '(não informado)'}</span></div>
+    <div><b>Cidade(s)</b> <span>${cidades}</span></div>
+    <div><b>Período de Execução</b> <span>${periodo}</span></div>
+  </div>
+
+  <table>
+    <thead><tr>
+      <th>Nº</th><th>Cidade</th><th>Rua / Logradouro</th><th>Extensão (m)</th><th>Largura (m)</th><th>Lados</th>
+      <th>Quantidade</th><th>Serviço Executado</th><th>Data</th><th>Equipe</th><th>Observações</th>
+    </tr></thead>
+    <tbody>`;
+
+  // Linha de subtotal ao final de cada grupo de serviço (os registros já
+  // vêm ordenados por serviço, então basta detectar quando o serviço muda).
+  // Valores (unitário/total) não aparecem aqui — só quantidade; o valor de
+  // cada serviço sai na tabela "Resumo por Serviço" no final do relatório.
+  function linhaSubtotalServico(nomeServico, subArea, subUnidades){
+    const qtdTxt = subUnidades.size === 1
+      ? subArea.toLocaleString('pt-BR') + ' ' + [...subUnidades][0]
+      : (subUnidades.size === 0 ? '' : '(unidades variadas)');
+    return `<tr style="background:#E6F0EA;font-weight:700;">
+      <td colspan="6" class="left">Total — ${nomeServico}</td>
+      <td>${qtdTxt}</td>
+      <td colspan="4"></td>
+    </tr>`;
+  }
+
+  let grupoServico = null;
+  let subArea = 0, subValor = 0;
+  let subUnidades = new Set();
+  let subPrecos = new Set(); // valores unitários distintos vistos no grupo (varia por cidade)
+  let grupoIsValorFixo = false;
+  const resumoServicos = []; // um item por serviço, pra montar o "Resumo por Serviço" no final
+  entries.forEach((e,i)=>{
+    const area = areaTotal(e);
+    const isValorFixo = entryIsValorFixo(e);
+
+    if(grupoServico !== null && e.servico !== grupoServico){
+      html += linhaSubtotalServico(grupoServico, subArea, subUnidades);
+      resumoServicos.push({ nome: grupoServico, area: subArea, valor: subValor, unidades: subUnidades, precos: subPrecos, isValorFixo: grupoIsValorFixo });
+      subArea = 0; subValor = 0; subUnidades = new Set(); subPrecos = new Set();
+    }
+    grupoServico = e.servico;
+    grupoIsValorFixo = isValorFixo;
+    const valorEntry = valorCalculadoEntry(e);
+    if(!isValorFixo && area !== null){
+      subArea += area;
+      subUnidades.add(e.unidade || 'm²');
+      // Cada cidade pode ter um valor diferente pra esse serviço — se o
+      // grupo tiver mais de um valor distinto, o resumo mostra um aviso em
+      // vez de um número só (que estaria errado pra parte dos lançamentos).
+      subPrecos.add(formatMoeda(valorUnitarioDoServico(e.servico, e.cidade)) + ' / ' + (e.unidade || 'm²'));
+    }
+    subValor += valorEntry;
+
+    html += `<tr>
+      <td>${i+1}</td>
+      <td class="left">${e.cidade}</td>
+      <td class="left">${enderecoCompleto(e)}</td>
+      <td>${isValorFixo?'':(e.extensao||'')}</td>
+      <td>${isValorFixo?'':(e.largura||'')}</td>
+      <td>${isValorFixo?'':(e.lados||'')}</td>
+      <td>${isValorFixo?'':(area===null?'':area.toLocaleString('pt-BR') + ' ' + (e.unidade||'m²'))}</td>
+      <td class="left">${e.servico}</td>
+      <td>${e.data.split('-').reverse().join('/')}</td>
+      <td>${e.equipe||''}</td>
+      <td class="left">${e.obs||''}</td>
+    </tr>`;
+  });
+  if(grupoServico !== null){
+    html += linhaSubtotalServico(grupoServico, subArea, subUnidades);
+    resumoServicos.push({ nome: grupoServico, area: subArea, valor: subValor, unidades: subUnidades, precos: subPrecos, isValorFixo: grupoIsValorFixo });
+  }
+
+  html += `</tbody>
+    <tfoot><tr>
+      <td colspan="6" class="left">TOTAL GERAL</td>
+      <td></td>
+      <td colspan="4"></td>
+    </tr></tfoot>
+  </table>
+
+  <h2 class="secao">Resumo por Serviço</h2>
+  <table>
+    <thead><tr>
+      <th>Serviço</th><th>Quantidade Total</th><th>Valor Unitário (R$)</th><th>Valor Total (R$)</th>
+    </tr></thead>
+    <tbody>
+      ${resumoServicos.map(r=>{
+        // Cada serviço tem sua própria unidade de medida, e o valor por
+        // unidade pode variar por cidade (contratos diferentes) — por isso
+        // só mostramos um valor único quando todos os lançamentos do grupo
+        // usaram o mesmo valor; se misturar cidades com valores diferentes,
+        // avisamos em vez de mostrar um número que estaria errado pra parte
+        // dos lançamentos (o Valor Total continua sempre certo, calculado
+        // lançamento por lançamento).
+        const qtdTxt = r.isValorFixo
+          ? '—'
+          : (r.unidades.size === 1 ? r.area.toLocaleString('pt-BR') + ' ' + [...r.unidades][0] : (r.unidades.size === 0 ? '' : '(unidades variadas)'));
+        const unitTxt = r.isValorFixo
+          ? 'Valor fixo mensal'
+          : (r.precos.size === 1 ? [...r.precos][0] : (r.precos.size === 0 ? '—' : '(valores variados por cidade)'));
+        return `<tr>
+          <td class="left">${r.nome}</td>
+          <td>${qtdTxt}</td>
+          <td>${unitTxt}</td>
+          <td>${formatMoeda(r.valor)}</td>
+        </tr>`;
+      }).join('')}
+    </tbody>
+    <tfoot><tr>
+      <td colspan="3" class="left">TOTAL GERAL</td>
+      <td>${formatMoeda(totalValor)}</td>
+    </tr></tfoot>
+  </table>
+
+  <script>window.onload=()=>{setTimeout(()=>window.print(),400);}<\/script></body></html>`;
+  win.document.write(html);
+  win.document.close();
+ } catch(err){
+  alert('Não consegui gerar a medição. Erro: ' + (err && err.message ? err.message : err));
+ }
+}
+
+function exportarFotos(){
+ try {
+  // Aba Exportar é restrita ao administrador; segunda trava aqui também.
+  if(!souAdmin()){ alert('Apenas o administrador tem acesso a este relatório.'); return; }
+  const { filtro, label } = filtroPeriodoExport();
+  const cidadeFiltro = document.getElementById('exp-cidade').value;
+  // Serviço "R$" (ajuda de custo mensal, tipo "Equipe Padrão") não tem foto
+  // nem local — não faz sentido entrar no relatório fotográfico.
+  const entries = ENTRIES.filter(e=>filtro(e) && (!cidadeFiltro || e.cidade===cidadeFiltro) && !entryIsValorFixo(e))
+    .sort((a,b)=>(a.cidade||'').localeCompare(b.cidade||'') || (a.rua||'').localeCompare(b.rua||''));
+  if(entries.length===0){ alert('Nenhum registro com foto para esse filtro.'); return; }
+
+  const cfg = CONFIG;
+  const cidades = [...new Set(entries.map(e=>e.cidade))].join(', ');
+  const datasOrdenadas = entries.map(e=>e.data).sort();
+  const periodo = datasOrdenadas.length ? datasOrdenadas[0].split('-').reverse().join('/') + ' a ' + datasOrdenadas[datasOrdenadas.length-1].split('-').reverse().join('/') : '';
+
+  const win = window.open('', '_blank');
+  if(!win){ alert('O navegador bloqueou a abertura do relatório.\n\nToque em "Gerar Relatório Fotográfico" novamente ou, se aparecer um aviso de pop-up bloqueado, toque nele e escolha "Permitir".'); return; }
+  let html = `<!DOCTYPE html><html lang="pt-BR"><head><meta charset="UTF-8"><title>Relatório Fotográfico — ${label}</title>
+  <style>
+    @page { size: A4; margin: 18mm 16mm; }
+    *{box-sizing:border-box;}
+    body{font-family:Arial,Helvetica,sans-serif;color:#1E2430;margin:0;padding:24px;max-width:900px;margin:0 auto;background:#fff;}
+    .letterhead{display:flex;justify-content:space-between;align-items:flex-end;border-bottom:3px solid #00632B;padding-bottom:14px;margin-bottom:18px;}
+    .letterhead .brand{display:flex;align-items:center;gap:12px;}
+    .letterhead .brand img{width:52px;height:52px;object-fit:contain;}
+    .letterhead h1{font-size:14px;color:#00632B;margin:0 0 4px;letter-spacing:.3px;}
+    .letterhead .empresa{font-size:19px;color:#00632B;font-weight:700;letter-spacing:.2px;}
+    .letterhead .cnpj{font-size:10.5px;color:#9AA4B2;}
+    .letterhead .pagerinfo{font-size:11px;color:#6B7280;text-align:right;}
+    .identificacao{display:grid;grid-template-columns:1fr 1fr;gap:8px 24px;background:#F4F6F8;border:1px solid #E2E5EA;border-radius:8px;padding:14px 18px;margin-bottom:22px;font-size:12.5px;}
+    .identificacao div{display:flex;justify-content:space-between;border-bottom:1px dotted #C7CDD6;padding:3px 0;}
+    .identificacao b{color:#00632B;font-weight:700;}
+    .item{page-break-inside:avoid;border:1px solid #E2E5EA;border-radius:10px;padding:16px 18px;margin-bottom:18px;}
+    .item h2{margin:0 0 3px;font-size:15px;color:#1E2430;}
+    .item .local{font-size:12px;color:#6B7280;margin-bottom:8px;}
+    .item .meta{font-size:12px;color:#374151;background:#F9FAFB;border-radius:6px;padding:8px 10px;margin-bottom:12px;}
+    .item .meta b{color:#00632B;}
+    .imgs{display:flex;gap:12px;}
+    .imgs figure{flex:1;margin:0;text-align:center;}
+    .imgs img{width:100%;height:190px;object-fit:cover;border-radius:8px;border:1px solid #E2E5EA;display:block;}
+    .imgs .semfoto{width:100%;height:190px;border-radius:8px;border:1px dashed #C7CDD6;display:flex;align-items:center;justify-content:center;color:#9AA4B2;font-size:12px;}
+    .imgs figure:first-child figcaption{color:#00632B;}
+    .imgs figure:last-child figcaption{color:#ED6D22;}
+    .imgs figcaption{font-size:11px;font-weight:700;letter-spacing:.5px;margin-top:5px;}
+    .obs{font-size:11.5px;color:#6B7280;margin-top:10px;font-style:italic;}
+    .assinaturas{display:flex;gap:40px;margin-top:40px;page-break-inside:avoid;}
+    .assinatura{flex:1;text-align:center;}
+    .linha{border-top:1px solid #1E2430;margin-bottom:6px;padding-top:6px;}
+    .assinatura .cargo{font-size:11px;color:#6B7280;}
+    .voltar-bar{position:sticky;top:0;background:#00632B;color:#fff;padding:10px 14px;display:flex;align-items:center;justify-content:space-between;gap:10px;margin:-20px -20px 16px;font-size:12.5px;z-index:10;}
+    .voltar-bar button{background:#fff;color:#00632B;border:none;border-radius:6px;padding:8px 14px;font-weight:700;font-size:13px;cursor:pointer;white-space:nowrap;}
+    @media print { body{padding:0;} .item{page-break-inside:avoid;} .voltar-bar{display:none;} }
+  </style></head><body>
+
+  <div class="voltar-bar">
+    <span id="status-fotos">Carregando fotos, aguarde...</span>
+    <button onclick="window.close(); setTimeout(function(){ alert('Se a aba não fechou sozinha, troque de aba ou toque em voltar no navegador pra retornar ao app.'); }, 400);">← Voltar pro app</button>
+  </div>
+
+  <div class="letterhead">
+    <div class="brand">
+      <img src="/img/logo.jpg" alt="Logo">
+      <div>
+        <div class="empresa">${cfg.empresa || '[Nome da Construtora]'}</div>
+        <h1>Relatório Fotográfico Mensal — Limpeza Urbana</h1>
+        <div class="cnpj">${cfg.cnpj || ''}</div>
+      </div>
+    </div>
+    <div class="pagerinfo">Documento anexo à Medição Mensal</div>
+  </div>
+
+  <div class="identificacao">
+    <div><b>Mês de Referência</b> <span>${label}</span></div>
+    <div><b>Contrato / Nº Processo</b> <span>${contratoParaRelatorio(cidadeFiltro) || '(não informado)'}</span></div>
+    <div><b>Cidade(s)</b> <span>${cidades}</span></div>
+    <div><b>Período de Execução</b> <span>${periodo}</span></div>
+  </div>
+  `;
+
+  entries.forEach(e=>{
+    html += `<div class="item">
+      <h2>${enderecoCompleto(e)}</h2>
+      <div class="local">${e.cidade}</div>
+      <div class="meta">
+        <b>Serviço:</b> ${e.servico} &nbsp;·&nbsp; <b>Data:</b> ${e.data.split('-').reverse().join('/')} &nbsp;·&nbsp; <b>Equipe:</b> ${e.equipe||'-'}<br>
+        <b>Medição:</b> ${formatMedida(e) || '-'}
+      </div>
+      <div class="imgs">
+        <figure>
+          ${e.fotoAntes?`<img src="${fotoParaExibir(e,'fotoAntes')}">`:'<div class="semfoto">Sem foto</div>'}
+          <figcaption>ANTES</figcaption>
+        </figure>
+        <figure>
+          ${e.fotoDepois?`<img src="${fotoParaExibir(e,'fotoDepois')}">`:'<div class="semfoto">Sem foto</div>'}
+          <figcaption>DEPOIS</figcaption>
+        </figure>
+      </div>
+      ${e.obs?`<div class="obs">Observações: ${e.obs}</div>`:''}
+    </div>`;
+  });
+
+  html += `
+  <div class="assinaturas">
+    <div class="assinatura">
+      <div class="linha">&nbsp;</div>
+      <div class="cargo">Responsável Técnico — ${cfg.empresa || '[Nome da Construtora]'}</div>
+    </div>
+    <div class="assinatura">
+      <div class="linha">&nbsp;</div>
+      <div class="cargo">Fiscalização — Prefeitura Municipal</div>
+    </div>
+  </div>
+  <script>
+  (function(){
+    // Antes, o relatório mandava imprimir 400ms depois de abrir, sem checar
+    // se as fotos já tinham carregado — em fotos grandes (principalmente as
+    // antigas, de antes da compressão) ou em internet de celular mais lenta,
+    // isso fazia o PDF sair com foto faltando, ou parecer "travado" enquanto
+    // as fotos ainda estavam baixando escondido atrás da tela de impressão.
+    // Agora espera de verdade as fotos carregarem (ou desistirem de tentar),
+    // mostrando o progresso, antes de mandar imprimir.
+    var jaChamou = false;
+    function chamarImpressao(){
+      if(jaChamou) return;
+      jaChamou = true;
+      var status = document.getElementById('status-fotos');
+      if(status) status.textContent = 'Pronto! Use "Imprimir → Salvar como PDF" pra baixar.';
+      setTimeout(function(){ window.print(); }, 200);
+    }
+    function esperarFotos(){
+      var imgs = document.querySelectorAll('.imgs img');
+      var total = imgs.length;
+      var status = document.getElementById('status-fotos');
+      if(total === 0){ chamarImpressao(); return; }
+      var prontos = 0;
+      function atualizaStatus(){
+        if(status) status.textContent = 'Carregando fotos... ' + prontos + '/' + total;
+      }
+      atualizaStatus();
+      function marcarPronto(){
+        prontos++;
+        atualizaStatus();
+        if(prontos >= total) chamarImpressao();
+      }
+      imgs.forEach(function(img){
+        if(img.complete) marcarPronto();
+        else {
+          img.addEventListener('load', marcarPronto);
+          img.addEventListener('error', marcarPronto);
+        }
+      });
+      // Se alguma foto travar pra sempre (internet ruim demais), não deixa
+      // esperando eternamente — depois de 25s imprime do jeito que estiver.
+      setTimeout(chamarImpressao, 25000);
+    }
+    // Chama direto, sem esperar o evento "load" da janela: esse script já
+    // roda depois que todas as tags <img> foram inseridas na página (está
+    // no fim do HTML), então o navegador já começou a baixar as fotos — só
+    // falta esperar cada uma terminar. (O evento "load" de uma janela criada
+    // via document.write não é confiável pra isso: em alguns navegadores ele
+    // dispara antes mesmo das fotos terminarem de carregar.)
+    esperarFotos();
+  })();
+  <\/script></body></html>`;
+  win.document.write(html);
+  win.document.close();
+ } catch(err){
+  alert('Não consegui gerar o relatório fotográfico. Erro: ' + (err && err.message ? err.message : err));
+ }
+}
