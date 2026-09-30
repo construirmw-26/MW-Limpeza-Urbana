@@ -1723,11 +1723,12 @@ function exportarMedicao(){
   if(!souAdmin()){ alert('Apenas o administrador tem acesso a este relatório.'); return; }
   const { filtro, label } = filtroPeriodoExport();
   const cidadeFiltro = document.getElementById('exp-cidade').value;
-  // Agrupado por serviço (e dentro de cada serviço, por cidade/rua) — assim
-  // fica fácil ver e conferir o total de cada serviço, com uma linha de
-  // subtotal logo depois do último lançamento daquele serviço.
+  // Agrupado por serviço (pra manter o subtotal de cada serviço logo depois
+  // do último lançamento dele) e, dentro de cada serviço, em ORDEM DE DATA
+  // (do dia mais antigo pro mais recente). Se o relatório tiver mais de uma
+  // cidade, separa por cidade antes da data.
   const entries = ENTRIES.filter(e=>filtro(e) && (!cidadeFiltro || e.cidade===cidadeFiltro))
-    .sort((a,b)=>(a.servico||'').localeCompare(b.servico||'') || (a.cidade||'').localeCompare(b.cidade||'') || (a.rua||'').localeCompare(b.rua||''));
+    .sort((a,b)=>(a.servico||'').localeCompare(b.servico||'') || (a.cidade||'').localeCompare(b.cidade||'') || (a.data||'').localeCompare(b.data||'') || (a.rua||'').localeCompare(b.rua||'') || (a.criadoEm||'').localeCompare(b.criadoEm||''));
   if(entries.length===0){ alert('Nenhum registro para esse filtro.'); return; }
 
   const cfg = CONFIG;
@@ -1934,7 +1935,9 @@ function exportarFotos(){
   // Serviço "R$" (ajuda de custo mensal, tipo "Equipe Padrão") não tem foto
   // nem local — não faz sentido entrar no relatório fotográfico.
   const entries = ENTRIES.filter(e=>filtro(e) && (!cidadeFiltro || e.cidade===cidadeFiltro) && !entryIsValorFixo(e))
-    .sort((a,b)=>(a.cidade||'').localeCompare(b.cidade||'') || (a.rua||'').localeCompare(b.rua||''));
+    // Em ORDEM DE DATA (do dia mais antigo pro mais recente); no mesmo dia,
+    // pela rua. Se tiver mais de uma cidade, separa por cidade antes.
+    .sort((a,b)=>(a.cidade||'').localeCompare(b.cidade||'') || (a.data||'').localeCompare(b.data||'') || (a.rua||'').localeCompare(b.rua||'') || (a.criadoEm||'').localeCompare(b.criadoEm||''));
   if(entries.length===0){ alert('Nenhum registro com foto para esse filtro.'); return; }
 
   const cfg = CONFIG;
