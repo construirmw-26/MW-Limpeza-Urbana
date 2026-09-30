@@ -15,6 +15,7 @@ let fotoAntesData = null, fotoDepoisData = null;
 // escolhida no formulário; ao editar sem trocar a foto fica null e o
 // servidor mantém a miniatura que já tinha).
 let fotoAntesMini = null, fotoDepoisMini = null;
+let editandoOriginal = null; // registro que está sendo editado (quando em modo edição)
 let editandoId = null; // id do registro sendo editado, ou null quando é um lançamento novo
 
 // Unidade de medida de um serviço pelo nome (usada em "+ Registro" e nas
@@ -651,7 +652,11 @@ async function editarRegistro(id){
   document.getElementById('f-antes').value = '';
   document.getElementById('f-depois').value = '';
 
-  limparLinhasServico(); // edição é sempre de um serviço só, por registro
+  // Na edição também dá pra usar "+ Outro serviço nesta mesma rua": o
+  // registro original é atualizado e cada serviço extra vira um registro
+  // NOVO com a mesma rua, data, equipe, observações e fotos.
+  limparLinhasServico();
+  editandoOriginal = e;
   entrarNoModoEdicao();
   window.scrollTo({top:0, behavior:'smooth'});
 }
@@ -659,11 +664,11 @@ async function editarRegistro(id){
 function entrarNoModoEdicao(){
   document.getElementById('aviso-editando').classList.remove('hidden');
   document.getElementById('btn-salvar').textContent = 'Salvar Alterações';
-  document.getElementById('btn-add-servico').classList.add('hidden');
 }
 
 function sairDoModoEdicao(){
   editandoId = null;
+  editandoOriginal = null;
   document.getElementById('aviso-editando').classList.add('hidden');
   document.getElementById('btn-salvar').textContent = 'Salvar Registro';
   document.getElementById('btn-add-servico').classList.remove('hidden');
@@ -681,14 +686,12 @@ async function salvarRegistro(){
   const data = document.getElementById('f-data').value;
   const obs = document.getElementById('f-obs').value.trim();
 
-  // Em modo edição só existe a linha principal (não dá pra editar vários
-  // serviços de uma vez). Criando um registro novo, a linha principal + as
-  // linhas extras adicionadas em "+ Outro serviço nesta mesma rua" viram,
-  // cada uma, um registro separado — todas com a mesma rua, data, equipe,
-  // observações e fotos.
-  const linhas = editandoId
-    ? [lerLinhaServico('f')]
-    : [lerLinhaServico('f'), ...extrasServico.map(seq=>lerLinhaServico('se'+seq))];
+  // A linha principal + as linhas extras adicionadas em "+ Outro serviço
+  // nesta mesma rua" viram, cada uma, um registro separado — todas com a
+  // mesma rua, data, equipe, observações e fotos. Editando, a linha
+  // principal atualiza o registro que já existia e as extras viram
+  // registros novos.
+  const linhas = [lerLinhaServico('f'), ...extrasServico.map(seq=>lerLinhaServico('se'+seq))];
 
   for(const l of linhas){
     if(!l.servico){
@@ -718,13 +721,28 @@ async function salvarRegistro(){
     if(editando){
       const l = linhas[0];
       const ruaIdLinha = unidadeDoServico(l.servico) === 'R$' ? '' : ruaId;
-      await api('PUT', '/api/entries/' + encodeURIComponent(editandoId), {
+      const atualizado = await api('PUT', '/api/entries/' + encodeURIComponent(editandoId), {
         cidade, ruaId: ruaIdLinha, equipe, data, obs,
         servico: l.servico, extensao: l.extensao, largura: l.largura, lados: l.lados, valor: l.valor,
         fotoAntes: fotoAntesData, fotoDepois: fotoDepoisData,
         fotoAntesMini: fotoAntesMini || undefined, fotoDepoisMini: fotoDepoisMini || undefined
       });
-      toast('Registro atualizado ✓');
+      // Serviços extras adicionados na edição: registros novos que
+      // aproveitam as fotos do registro (o servidor faz uma cópia delas).
+      const extras = linhas.slice(1);
+      for(const lx of extras){
+        const ruaIdExtra = unidadeDoServico(lx.servico) === 'R$' ? '' : ruaId;
+        const semFoto = unidadeDoServico(lx.servico) === 'R$';
+        await api('POST', '/api/entries', {
+          cidade, ruaId: ruaIdExtra, equipe, data, obs,
+          servico: lx.servico, extensao: lx.extensao, largura: lx.largura, lados: lx.lados, valor: lx.valor,
+          fotoAntes: semFoto ? null : (atualizado.fotoAntes || null),
+          fotoDepois: semFoto ? null : (atualizado.fotoDepois || null),
+          fotoAntesMini: semFoto ? undefined : (atualizado.fotoAntesMini || undefined),
+          fotoDepoisMini: semFoto ? undefined : (atualizado.fotoDepoisMini || undefined)
+        });
+      }
+      toast(extras.length ? 'Registro atualizado ✓ + ' + extras.length + ' serviço(s) adicionado(s)' : 'Registro atualizado ✓');
     } else {
       for(const l of linhas){
         const ruaIdLinha = unidadeDoServico(l.servico) === 'R$' ? '' : ruaId;
