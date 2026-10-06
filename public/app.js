@@ -271,6 +271,7 @@ function sugerirEquipe(){
 // padronizados. Aqui buscamos as ruas da cidade selecionada no formulário.
 async function atualizarRuasPelaCidade(){
   sugerirEquipe();
+  document.getElementById('f-rua-busca').value = ''; // cidade nova: começa a busca do zero
   const nomeCidade = document.getElementById('f-cidade').value;
   if(!nomeCidade){
     RUAS = [];
@@ -294,23 +295,57 @@ async function atualizarRuasPelaCidade(){
   popularSelectServico(); // recarrega os serviços disponíveis pra cidade escolhida
 }
 
-function popularSelectRua(){
+// Busca de rua: o campo de texto em cima da lista filtra as ruas enquanto
+// digita (sem diferenciar maiúscula/minúscula nem acento — "cecilia" acha
+// "Cecília"), procurando no nome, no número e no bairro. Se sobrar só uma
+// rua, ela já fica selecionada sozinha.
+function normalizarBusca(t){
+  return String(t || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
+}
+
+function filtrarRuas(){
+  popularSelectRua(true);
+}
+
+function popularSelectRua(veioDaBusca){
   const selCidade = document.getElementById('f-cidade');
   const sel = document.getElementById('f-rua');
+  const busca = document.getElementById('f-rua-busca');
   const aviso = document.getElementById('sem-rua-aviso');
   if(!selCidade.value){
     sel.innerHTML = '<option value="">Selecione a cidade primeiro...</option>';
     sel.disabled = true;
+    busca.value = ''; busca.disabled = true;
     aviso.classList.add('hidden');
   } else if(RUAS.length === 0){
     sel.innerHTML = '<option value="">Nenhuma rua cadastrada</option>';
     sel.disabled = true;
+    busca.value = ''; busca.disabled = true;
     aviso.classList.remove('hidden');
   } else {
     const atual = sel.value;
-    sel.innerHTML = '<option value="">Selecione a rua...</option>' + RUAS.map(r=>`<option value="${r.id}">${r.nome}${r.bairro ? ' - ' + r.bairro : ''}</option>`).join('');
-    if(RUAS.some(r=>r.id===atual)) sel.value = atual;
+    const termo = normalizarBusca(busca.value);
+    const rotulo = r => r.nome + (r.numero ? ', nº ' + r.numero : '') + (r.bairro ? ' - ' + r.bairro : '');
+    const ordenadas = [...RUAS].sort((a,b)=>(a.nome||'').localeCompare(b.nome||'', 'pt-BR'));
+    let visiveis = termo
+      ? ordenadas.filter(r => normalizarBusca(rotulo(r)).includes(termo))
+      : ordenadas;
+    // A rua que já estava escolhida continua na lista mesmo que não bata
+    // com o que foi digitado (pra não "sumir" a escolha sem querer).
+    const ruaAtual = RUAS.find(r=>r.id===atual);
+    if(ruaAtual && !visiveis.includes(ruaAtual) && !veioDaBusca) visiveis = [ruaAtual, ...visiveis];
+
+    let primeira;
+    if(visiveis.length === 0) primeira = '<option value="">Nenhuma rua encontrada com "' + busca.value.replace(/</g,'&lt;') + '"</option>';
+    else if(termo) primeira = '<option value="">' + visiveis.length + ' rua(s) encontrada(s) — escolha...</option>';
+    else primeira = '<option value="">Selecione a rua...</option>';
+    sel.innerHTML = primeira + visiveis.map(r=>`<option value="${r.id}">${rotulo(r).replace(/</g,'&lt;')}</option>`).join('');
+
+    if(visiveis.length === 1 && termo) sel.value = visiveis[0].id;
+    else if(visiveis.some(r=>r.id===atual)) sel.value = atual;
+    else sel.value = '';
     sel.disabled = false;
+    busca.disabled = false;
     aviso.classList.add('hidden');
   }
   atualizarBotaoSalvar();
