@@ -950,8 +950,14 @@ async function renderLista(){
       <div class="entry-sub" style="margin-top:8px;">${formatMedida(e)?formatMedida(e)+' · ':''}${e.equipe||''}</div>
       ${e.obs?`<div class="entry-sub" style="margin-top:4px;">${e.obs}</div>`:''}
       ${(e.fotoAntes||e.fotoDepois)?`<div class="entry-photos">
-        ${e.fotoAntes?`<img src="${fotoParaExibir(e,'fotoAntes')}" loading="lazy">`:''}
-        ${e.fotoDepois?`<img src="${fotoParaExibir(e,'fotoDepois')}" loading="lazy">`:''}
+        <figure>
+          ${e.fotoAntes?`<a class="foto-box" href="${e.fotoAntes}" target="_blank" rel="noopener"><img src="${fotoParaExibir(e,'fotoAntes')}" loading="lazy" alt="Antes"></a>`:'<div class="foto-box vazia">Sem foto</div>'}
+          <figcaption>ANTES</figcaption>
+        </figure>
+        <figure>
+          ${e.fotoDepois?`<a class="foto-box" href="${e.fotoDepois}" target="_blank" rel="noopener"><img src="${fotoParaExibir(e,'fotoDepois')}" loading="lazy" alt="Depois"></a>`:'<div class="foto-box vazia">Sem foto</div>'}
+          <figcaption>DEPOIS</figcaption>
+        </figure>
       </div>`:''}
       ${(souAdmin() || e.unidade !== 'R$') ? `
       <div class="entry-actions">
@@ -2004,8 +2010,11 @@ function exportarFotos(){
     .item .meta b{color:#00632B;}
     .imgs{display:flex;gap:12px;}
     .imgs figure{flex:1;margin:0;text-align:center;}
-    .imgs img{width:100%;height:190px;object-fit:cover;border-radius:8px;border:1px solid #E2E5EA;display:block;}
-    .imgs .semfoto{width:100%;height:190px;border-radius:8px;border:1px dashed #C7CDD6;display:flex;align-items:center;justify-content:center;color:#9AA4B2;font-size:12px;}
+    /* Foto INTEIRA (sem cortar nem esticar), num quadro maior — foto em pé
+       ou deitada aparece do jeito que foi tirada, com fundo cinza claro em
+       volta quando ela não ocupa o quadro todo. */
+    .imgs img{width:100%;height:300px;object-fit:contain;background:#F4F6F8;border-radius:8px;border:1px solid #E2E5EA;display:block;}
+    .imgs .semfoto{width:100%;height:300px;border-radius:8px;border:1px dashed #C7CDD6;display:flex;align-items:center;justify-content:center;color:#9AA4B2;font-size:12px;}
     .imgs figure:first-child figcaption{color:#00632B;}
     .imgs figure:last-child figcaption{color:#ED6D22;}
     .imgs figcaption{font-size:11px;font-weight:700;letter-spacing:.5px;margin-top:5px;}
