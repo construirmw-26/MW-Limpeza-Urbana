@@ -1,951 +1,458 @@
-// Coleta de Campo — servidor (sem dependências externas, só Node puro).
-// Guarda os dados em /data (arquivo JSON + fotos), autentica usuários por
-// usuário/senha com cookie de sessão, e serve o app (public/) + a API.
-"use strict";
-const http = require("http");
-const path = require("path");
-const fs = require("fs");
-const crypto = require("crypto");
-
-const { state, persist, persistSync, UPLOADS_DIR } = require("./lib/db");
-const {
-  sendJSON,
-  readJSON,
-  parseCookies,
-  setCookie,
-  clearCookie,
-  serveStatic,
-} = require("./lib/http-helpers");
-const {
-  hashSenha,
-  verificarSenha,
-  criarSessao,
-  destruirSessao,
-  usuarioDaSessao,
-  usuarioPublico,
-  cidadeDoUsuario,
-} = require("./lib/auth");
-const { escreverZip } = require("./lib/zip");
-
-const PORT = process.env.PORT || 3000;
-const PUBLIC_DIR = path.join(__dirname, "public");
-const COOKIE_NAME = "cc_session";
-
-// ---- Cria o primeiro usuário administrador se ainda não existir nenhum ----
-function bootstrapAdmin() {
-  if (state.users.length > 0) return;
-  const usuario = process.env.ADMIN_USER || "admin";
-  const senha = process.env.ADMIN_PASSWORD || crypto.randomBytes(6).toString("hex");
-  const nome = process.env.ADMIN_NOME || "Administrador";
-  state.users.push({
-    id: crypto.randomUUID(),
-    nome,
-    usuario,
-    senha: hashSenha(senha),
-    role: "admin",
-    criadoEm: new Date().toISOString(),
-  });
-  persist();
-  console.log("========================================================");
-  console.log("Nenhum usuário existia — criei o administrador inicial:");
-  console.log("  usuário:", usuario);
-  if (!process.env.ADMIN_PASSWORD) {
-    console.log("  senha  :", senha, "(gerada automaticamente — troque depois de logar)");
-  } else {
-    console.log("  senha  : (definida pela variável de ambiente ADMIN_PASSWORD)");
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1">
+<title>MW Limpeza Urbana — Coleta de Campo</title>
+<link rel="manifest" href="/manifest.json">
+<meta name="theme-color" content="#00632B">
+<link rel="icon" href="/img/icon-192.png">
+<link rel="apple-touch-icon" href="/img/apple-touch-icon.png">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="MW Limpeza">
+<style>
+  :root{
+    --primary:#00632B;
+    --primary-dark:#00441D;
+    --accent:#ED6D22;
+    --accent-tint:#FDEBDD;
+    --bg:#F4F6F8;
+    --card:#FFFFFF;
+    --text:#1E2430;
+    --muted:#6B7280;
+    --border:#E2E5EA;
+    --danger:#C0392B;
+    --radius:12px;
+    --logo-green:#00A87F;
+    --logo-green-dark:#007054;
   }
-  console.log("========================================================");
-}
-bootstrapAdmin();
-
-// ---- Converte cidades salvas no formato antigo (texto simples) para o
-// formato novo (objeto com contrato/responsável/telefone/documentos), e
-// garante que cidades já no formato novo tenham a lista de documentos ----
-function bootstrapCidades() {
-  let mudou = false;
-  state.cidades = state.cidades.map((c) => {
-    if (typeof c === "string") {
-      mudou = true;
-      return { id: crypto.randomUUID(), nome: c, contrato: "", responsavel: "", telefone: "", documentos: [] };
-    }
-    if (!Array.isArray(c.documentos)) {
-      mudou = true;
-      c.documentos = [];
-    }
-    return c;
-  });
-  if (mudou) persist();
-}
-bootstrapCidades();
-
-// ---- Migra metas antigas (um valor global por serviço) para o novo
-// formato (um conjunto de metas por cidade — já que cada cidade agora
-// pode ter uma meta diferente para o mesmo serviço). Só roda uma vez: se
-// o formato já é o novo (valores são objetos, não números), não mexe. ----
-function bootstrapMetas() {
-  const chaves = Object.keys(state.metas || {});
-  const formatoAntigo = chaves.some((k) => typeof state.metas[k] === "number");
-  if (!formatoAntigo) return;
-  const antigas = state.metas;
-  state.metas = {};
-  for (const c of state.cidades) {
-    state.metas[c.nome] = { ...antigas };
+  *{box-sizing:border-box;}
+  body{margin:0;font-family:Arial,Helvetica,sans-serif;background:var(--bg);color:var(--text);padding-bottom:80px;}
+  header{background:var(--primary);color:#fff;padding:16px 18px;position:sticky;top:0;z-index:10;box-shadow:0 2px 6px rgba(0,0,0,.15);border-bottom:3px solid var(--accent);display:flex;align-items:center;gap:12px;}
+  header img{width:38px;height:38px;object-fit:contain;border-radius:6px;background:#fff;padding:3px;}
+  header h1{margin:0;font-size:18px;font-weight:700;}
+  header p{margin:2px 0 0;font-size:12px;opacity:.85;}
+  header .quem{margin-left:auto;text-align:right;font-size:12px;}
+  header .quem b{display:block;font-size:13px;}
+  header .sair{background:rgba(255,255,255,.18);border:none;color:#fff;font-size:11px;font-weight:700;padding:5px 10px;border-radius:20px;margin-top:4px;cursor:pointer;}
+  main{max-width:720px;margin:0 auto;padding:14px;}
+  .tabs{display:flex;gap:6px;margin-bottom:14px;position:sticky;top:70px;background:var(--bg);padding:8px 0;z-index:9;overflow-x:auto;}
+  .tab{flex:1;min-width:76px;text-align:center;padding:10px 6px;border-radius:10px;background:var(--card);border:1px solid var(--border);font-size:12.5px;font-weight:700;color:var(--muted);cursor:pointer;white-space:nowrap;}
+  .tab.active{background:var(--primary);color:#fff;border-color:var(--primary);}
+  .view{display:none;}
+  .view.active{display:block;}
+  .card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:16px;margin-bottom:12px;}
+  label{display:block;font-size:12.5px;font-weight:700;color:var(--muted);margin:12px 0 5px;}
+  label:first-child{margin-top:0;}
+  input[type=text],input[type=search],input[type=number],input[type=date],input[type=password],select,textarea{
+    width:100%;padding:11px 12px;border:1px solid var(--border);border-radius:9px;font-size:15px;font-family:inherit;background:#fff;color:var(--text);
   }
-  persist();
-}
-bootstrapMetas();
+  textarea{resize:vertical;min-height:60px;}
+  .photo-row{display:flex;gap:10px;}
+  .photo-box{flex:1;}
+  .photo-input{border:2px dashed var(--border);border-radius:9px;padding:10px;text-align:center;position:relative;overflow:hidden;min-height:110px;display:flex;align-items:center;justify-content:center;background:#FAFBFC;}
+  .photo-input img{max-width:100%;max-height:140px;border-radius:6px;}
+  .photo-input span{font-size:12px;color:var(--muted);}
+  .photo-input input{position:absolute;inset:0;opacity:0;cursor:pointer;}
+  .btn{display:inline-block;width:100%;padding:13px;border:none;border-radius:9px;font-size:15px;font-weight:700;cursor:pointer;margin-top:16px;}
+  .btn-primary{background:var(--primary);color:#fff;}
+  .btn-primary:active{background:var(--primary-dark);}
+  .btn-secondary{background:#fff;color:var(--primary);border:1.5px solid var(--primary);}
+  .btn-outline{background:#fff;color:var(--text);border:1px solid var(--border);}
+  .btn:disabled{opacity:.6;}
+  .row2{display:flex;gap:10px;}
+  .row2 > div{flex:1;}
+  .stats{display:flex;gap:10px;margin-bottom:12px;}
+  .stat{flex:1;background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:12px;text-align:center;}
+  .stat b{display:block;font-size:20px;color:var(--primary);}
+  .stat span{font-size:11px;color:var(--muted);}
+  .entry{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:14px;margin-bottom:10px;}
+  .entry-top{display:flex;justify-content:space-between;align-items:flex-start;gap:8px;}
+  .entry-title{font-weight:700;font-size:15px;}
+  .entry-sub{font-size:12.5px;color:var(--muted);margin-top:2px;}
+  .badge{display:inline-block;background:var(--accent-tint);color:var(--accent);font-size:11px;font-weight:700;padding:3px 8px;border-radius:20px;margin-top:6px;}
+  /* Fotos na lista de registros: a foto aparece INTEIRA (sem cortar nem
+     esticar), dentro de um quadro de tamanho fixo com fundo cinza claro —
+     foto em pé ou deitada, sempre do jeito que foi tirada. Tocar na foto
+     abre ela grande, em tamanho original. */
+  .entry-photos{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px;}
+  .entry-photos figure{margin:0;}
+  .entry-photos .foto-box{display:flex;align-items:center;justify-content:center;height:180px;background:#F1F3F5;border:1px solid var(--border);border-radius:8px;overflow:hidden;}
+  .entry-photos .foto-box img{width:100%;height:100%;object-fit:contain;display:block;}
+  .entry-photos .foto-box.vazia{color:#9AA4B2;font-size:12px;border-style:dashed;}
+  .entry-photos figcaption{font-size:11px;font-weight:700;letter-spacing:.5px;text-align:center;margin-top:4px;}
+  .entry-photos figure:first-child figcaption{color:#00632B;}
+  .entry-photos figure:last-child figcaption{color:#ED6D22;}
+  .entry-actions{display:flex;gap:8px;margin-top:10px;}
+  .entry-actions button{flex:1;padding:8px;font-size:12.5px;border-radius:7px;border:1px solid var(--border);background:#fff;font-weight:700;}
+  .entry-actions .del{color:var(--danger);border-color:#F1D1CC;}
+  .entry-actions .edit{color:var(--primary);border-color:#BFE0CD;}
+  .edit-banner{display:flex;align-items:center;justify-content:space-between;gap:10px;background:var(--accent-tint);border:1px solid #F3CBA6;color:var(--accent);border-radius:9px;padding:10px 12px;margin-bottom:12px;font-size:13px;font-weight:700;}
+  .edit-banner button{background:none;border:1px solid var(--accent);color:var(--accent);border-radius:7px;padding:5px 10px;font-size:12px;font-weight:700;cursor:pointer;}
+  .filters{display:flex;gap:8px;margin-bottom:12px;}
+  .filters select, .filters input{flex:1;}
+  .empty{text-align:center;color:var(--muted);padding:30px 10px;font-size:14px;}
+  .note{font-size:12px;color:var(--muted);line-height:1.5;background:#FFF8E1;border:1px solid #F3E3A6;border-radius:9px;padding:10px 12px;margin-top:6px;}
+  h2{font-size:15px;margin:0 0 10px;}
+  .toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:#1E2430;color:#fff;padding:10px 18px;border-radius:20px;font-size:13px;opacity:0;transition:opacity .25s;pointer-events:none;z-index:50;}
+  .toast.show{opacity:1;}
+  .modal-overlay{position:fixed;inset:0;background:rgba(30,36,48,.55);display:flex;align-items:center;justify-content:center;z-index:100;padding:24px;}
+  .modal-box{background:#fff;border-radius:var(--radius);padding:20px;max-width:340px;width:100%;box-shadow:0 8px 30px rgba(0,0,0,.3);}
+  .modal-box p{margin:0 0 18px;font-size:14.5px;color:var(--text);line-height:1.5;}
+  .modal-actions{display:flex;gap:10px;}
+  .meta-bar-bg{background:#E2E5EA;border-radius:20px;height:14px;overflow:hidden;margin:12px 0 6px;}
+  .meta-bar-fill{height:100%;background:var(--primary);border-radius:20px;transition:width .3s;}
+  .hidden{display:none !important;}
 
-// ---------------------------- Helpers de rota ------------------------------
-function getAuthUser(req) {
-  const cookies = parseCookies(req);
-  return usuarioDaSessao(cookies[COOKIE_NAME]);
-}
+  #login-screen{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px;background:var(--logo-green);background:linear-gradient(160deg,var(--logo-green) 0%,var(--logo-green-dark) 100%);}
+  .login-box{background:transparent;border:none;box-shadow:none;padding:28px 10px;max-width:360px;width:100%;}
+  .login-box img{width:160px;height:auto;object-fit:contain;display:block;margin:0 auto 16px;filter:drop-shadow(0 8px 18px rgba(0,0,0,.28));}
+  .login-box h1{font-size:20px;text-align:center;color:#fff;margin:0 0 2px;letter-spacing:.3px;display:flex;align-items:center;justify-content:center;gap:7px;}
+  .login-box h1 .mw-mark{height:24px;width:auto;display:block;margin:0;}
+  .login-box .sub{text-align:center;color:rgba(255,255,255,.8);font-size:12.5px;margin-bottom:20px;}
+  #login-screen label{color:rgba(255,255,255,.9);}
+  #login-screen input[type=text],#login-screen input[type=password]{background:rgba(255,255,255,.14);border:1px solid rgba(255,255,255,.4);color:#fff;}
+  #login-screen input[type=text]::placeholder,#login-screen input[type=password]::placeholder{color:rgba(255,255,255,.55);}
+  #login-screen input[type=text]:focus,#login-screen input[type=password]:focus{outline:none;background:rgba(255,255,255,.22);border-color:rgba(255,255,255,.7);}
+  #login-screen .btn-primary{background:var(--accent);color:#fff;}
+  #login-screen .btn-primary:active{background:#D45A12;}
+  .login-erro{color:#FFCFC2;font-size:12.5px;margin-top:10px;text-align:center;min-height:16px;font-weight:700;}
+</style>
+</head>
+<body>
 
-function requireAuth(req, res) {
-  const user = getAuthUser(req);
-  if (!user) {
-    sendJSON(res, 401, { erro: "Não autenticado" });
-    return null;
-  }
-  return user;
-}
+<!-- TELA DE LOGIN -->
+<div id="login-screen">
+  <div class="login-box">
+    <img src="/img/logo-icon.png" alt="MW Limpeza Urbana">
+    <h1><img src="/img/mw-mark.png" alt="MW" class="mw-mark"> Limpeza Urbana</h1>
+    <div class="sub">Coleta de Campo — entre com seu usuário</div>
+    <label>Usuário</label>
+    <input type="text" id="login-usuario" autocomplete="username" autocapitalize="off">
+    <label>Senha</label>
+    <input type="password" id="login-senha" autocomplete="current-password" onkeydown="if(event.key==='Enter'){event.preventDefault();fazerLogin();}">
+    <button class="btn btn-primary" id="login-btn" onclick="fazerLogin()">Entrar</button>
+    <div class="login-erro" id="login-erro"></div>
+  </div>
+</div>
 
-function requireAdmin(req, res) {
-  const user = requireAuth(req, res);
-  if (!user) return null;
-  if (user.role !== "admin") {
-    sendJSON(res, 403, { erro: "Somente administradores" });
-    return null;
-  }
-  return user;
-}
+<!-- APP -->
+<div id="app-root" class="hidden">
+  <header>
+    <img src="/img/logo.jpg" alt="Logo">
+    <div>
+      <h1>MW Limpeza Urbana</h1>
+      <p>Coleta de Campo · Medição + Relatório Fotográfico</p>
+    </div>
+    <div class="quem">
+      <b id="quem-nome"></b>
+      <button class="sair" onclick="fazerLogout()">Sair</button>
+    </div>
+  </header>
 
-// Salva uma foto em base64 (data URL) em /data/uploads e devolve a URL pública.
-function salvarFotoBase64(dataUrl) {
-  if (!dataUrl || typeof dataUrl !== "string" || !dataUrl.startsWith("data:")) return null;
-  const match = dataUrl.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/);
-  if (!match) return null;
-  const mime = match[1];
-  const ext = mime === "image/png" ? "png" : mime === "image/webp" ? "webp" : "jpg";
-  const buf = Buffer.from(match[2], "base64");
-  const nome = crypto.randomBytes(16).toString("hex") + "." + ext;
-  fs.writeFileSync(path.join(UPLOADS_DIR, nome), buf);
-  return "/uploads/" + nome;
-}
+  <main>
+    <div class="tabs">
+      <div class="tab active" data-tab="novo">+ Registro</div>
+      <div class="tab" data-tab="lista">Registros</div>
+      <div class="tab" data-tab="metas">Metas</div>
+      <div class="tab hidden" data-tab="cidades" id="tab-cidades">Cidades</div>
+      <div class="tab hidden" data-tab="servicos" id="tab-servicos">Serviços</div>
+      <div class="tab hidden" data-tab="usuarios" id="tab-usuarios">Usuários</div>
+      <div class="tab hidden" data-tab="exportar" id="tab-exportar">Exportar</div>
+    </div>
 
-// Igual à de cima, mas também aceita PDF (para contratos/aditivos anexados).
-function salvarArquivoBase64(dataUrl) {
-  if (!dataUrl || typeof dataUrl !== "string" || !dataUrl.startsWith("data:")) return null;
-  const match = dataUrl.match(/^data:([a-zA-Z0-9.+-]+\/[a-zA-Z0-9.+-]+);base64,(.+)$/);
-  if (!match) return null;
-  const mime = match[1];
-  const extPorMime = {
-    "application/pdf": "pdf",
-    "image/png": "png",
-    "image/webp": "webp",
-    "image/jpeg": "jpg",
-  };
-  const ext = extPorMime[mime];
-  if (!ext) return null; // tipo de arquivo não suportado
-  const buf = Buffer.from(match[2], "base64");
-  const nome = crypto.randomBytes(16).toString("hex") + "." + ext;
-  fs.writeFileSync(path.join(UPLOADS_DIR, nome), buf);
-  return "/uploads/" + nome;
-}
+    <!-- NOVO REGISTRO -->
+    <div class="view active" id="view-novo">
+      <div class="edit-banner hidden" id="aviso-editando">
+        <span>✏️ Editando um registro já lançado</span>
+        <button onclick="cancelarEdicao()">Cancelar</button>
+      </div>
+      <div class="card">
+        <h2>Novo registro de serviço</h2>
 
-// Faz uma CÓPIA de uma foto que já está salva (usado quando, ao editar um
-// registro, a pessoa adiciona outro serviço na mesma rua: o registro novo
-// aproveita as mesmas fotos). Cada registro fica com seu próprio arquivo,
-// então apagar um registro depois não some com a foto do outro.
-// Só copia fotos que pertencem a um registro que essa pessoa pode ver
-// (administrador: qualquer um; encarregado: só da cidade dele).
-function copiarFotoExistente(url, podeVer) {
-  if (!url || typeof url !== "string" || !url.startsWith("/uploads/")) return null;
-  const nomeOrigem = path.basename(url);
-  const referenciada = state.entries.some(
-    (e) =>
-      podeVer(e) &&
-      [e.fotoAntes, e.fotoDepois, e.fotoAntesMini, e.fotoDepoisMini].some((u) => u && path.basename(u) === nomeOrigem)
-  );
-  if (!referenciada) return null;
-  const origem = path.join(UPLOADS_DIR, nomeOrigem);
-  if (!fs.existsSync(origem)) return null;
-  const nome = crypto.randomBytes(16).toString("hex") + (path.extname(nomeOrigem) || ".jpg");
-  fs.copyFileSync(origem, path.join(UPLOADS_DIR, nome));
-  return "/uploads/" + nome;
-}
+        <label>Cidade</label>
+        <select id="f-cidade" onchange="atualizarRuasPelaCidade()">
+          <option value="">Selecione a cidade...</option>
+        </select>
+        <div class="note hidden" id="sem-cidade-aviso">Você ainda não tem uma cidade atribuída — fale com o administrador para poder lançar registros.</div>
+        <div class="note hidden" id="nota-add-cidade" style="margin-top:6px;">Cidade não está na lista? Adicione na aba "Cidades".</div>
 
-function removerFotoSeForUpload(url) {
-  if (!url || typeof url !== "string" || !url.startsWith("/uploads/")) return;
-  const full = path.join(UPLOADS_DIR, path.basename(url));
-  fs.unlink(full, () => {});
-}
+        <div id="grp-rua">
+          <label>Rua / Logradouro</label>
+          <input type="search" id="f-rua-busca" placeholder="🔎 Digite para buscar a rua..." autocomplete="off" oninput="filtrarRuas()" style="margin-bottom:6px;" disabled>
+          <select id="f-rua">
+            <option value="">Selecione a cidade primeiro...</option>
+          </select>
+          <div class="note hidden" id="sem-rua-aviso">Nenhuma rua cadastrada para essa cidade ainda — peça ao administrador para cadastrar na aba "Cidades".</div>
+        </div>
 
-// ------------------------------- Servidor -----------------------------------
-const server = http.createServer(async (req, res) => {
-  try {
-    const urlPath = req.url.split("?")[0];
-    const method = req.method;
+        <label>Serviço Executado</label>
+        <select id="f-servico" onchange="toggleServicoFields()">
+          <option value="">Selecione...</option>
+        </select>
+        <div class="note hidden" id="sem-servico-aviso">Nenhum serviço cadastrado ainda — peça ao administrador para cadastrar na aba "Serviços".</div>
 
-    // ---- Verificação de saúde (pro Coolify checar se o app está
-    // respondendo de verdade, não só se o processo está de pé). Não exige
-    // login nem toca no banco — só confirma que o servidor está atendendo
-    // pedidos rapidamente. Fica logo no início de tudo, antes de qualquer
-    // outra rota, pra responder o mais rápido possível. ----
-    if (method === "GET" && urlPath === "/api/status") {
-      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
-      res.end(JSON.stringify({ ok: true }));
-      return;
-    }
+        <div id="grp-medidas">
+          <div class="row2">
+            <div>
+              <label>Extensão (m)</label>
+              <input type="number" id="f-extensao" placeholder="Ex: 350" min="0" step="1">
+            </div>
+            <div id="grp-largura">
+              <label>Largura (m)</label>
+              <input type="number" id="f-largura" placeholder="Ex: 2" min="0" step="0.1">
+            </div>
+          </div>
+          <label>Lados executados</label>
+          <input type="number" id="f-lados" min="1" step="1" value="1" placeholder="Ex: 1">
+        </div>
 
-    // ---- Arquivos enviados (fotos) ----
-    if (method === "GET" && urlPath.startsWith("/uploads/")) {
-      if (serveStatic(req, res, UPLOADS_DIR, urlPath.replace("/uploads", ""), { cacheLongo: true })) return;
-      res.writeHead(404);
-      res.end("Não encontrado");
-      return;
-    }
+        <div id="grp-valor" style="display:none;">
+          <label>Valor (R$) — custo mensal fixo da cidade</label>
+          <input type="number" id="f-valor" placeholder="Ex: 1500.00" min="0" step="0.01">
+          <div class="note">Esse serviço é uma ajuda de custo mensal — não precisa de rua nem de foto, só entra com esse valor na Medição do mês.</div>
+        </div>
 
-    // ---------------------------- API ----------------------------
-    if (urlPath.startsWith("/api/")) {
-      res.setHeader("Content-Type", "application/json; charset=utf-8");
+        <div id="servicos-extra"></div>
+        <button type="button" class="btn btn-outline" id="btn-add-servico" onclick="adicionarLinhaServico()">+ Outro serviço nesta mesma rua</button>
+        <div class="note">Use isso quando, na mesma rua e com as mesmas fotos, a equipe executou mais de um serviço (ex: capina e roçada juntas) — cada serviço vira um registro separado na lista e nos relatórios.</div>
 
-      // ---- Login / Logout / Quem sou eu ----
-      if (method === "POST" && urlPath === "/api/login") {
-        const body = await readJSON(req);
-        const usuario = String(body.usuario || "").trim();
-        const senha = String(body.senha || "");
-        const user = state.users.find((u) => u.usuario.toLowerCase() === usuario.toLowerCase());
-        if (!user || !verificarSenha(senha, user.senha)) {
-          return sendJSON(res, 401, { erro: "Usuário ou senha inválidos" });
-        }
-        const { token } = criarSessao(user.id);
-        // Cookie de sessão SEM Max-Age/Expires (de propósito): assim o
-        // navegador apaga o cookie quando o app/navegador é fechado de
-        // verdade, e da próxima vez que abrir precisa entrar com a senha de
-        // novo — em vez de ficar "lembrado" por dias. A sessão em si ainda
-        // tem um limite de 30 dias no servidor (SESSAO_DIAS em lib/auth.js),
-        // que só serve de segurança extra caso o cookie sobreviva de algum
-        // jeito (por exemplo, se o navegador do celular só "pausar" o app
-        // em vez de encerrar de verdade).
-        setCookie(res, COOKIE_NAME, token, {
-          secure: process.env.NODE_ENV === "production",
-        });
-        return sendJSON(res, 200, usuarioPublico(user));
-      }
+        <label>Data</label>
+        <input type="date" id="f-data">
 
-      if (method === "POST" && urlPath === "/api/logout") {
-        const cookies = parseCookies(req);
-        if (cookies[COOKIE_NAME]) destruirSessao(cookies[COOKIE_NAME]);
-        clearCookie(res, COOKIE_NAME);
-        return sendJSON(res, 200, { ok: true });
-      }
+        <label>Equipe / Encarregado</label>
+        <input type="text" id="f-equipe" placeholder="Ex: Equipe 2 - João">
 
-      if (method === "GET" && urlPath === "/api/me") {
-        const user = getAuthUser(req);
-        if (!user) return sendJSON(res, 401, { erro: "Não autenticado" });
-        return sendJSON(res, 200, usuarioPublico(user));
-      }
+        <div id="grp-fotos">
+          <label>Foto do serviço</label>
+          <div class="photo-row">
+            <div class="photo-box">
+              <div class="photo-input" id="box-antes">
+                <div class="photo-preview" id="preview-antes"><span>📷 Antes</span></div>
+                <input type="file" accept="image/*" id="f-antes">
+              </div>
+            </div>
+            <div class="photo-box">
+              <div class="photo-input" id="box-depois">
+                <div class="photo-preview" id="preview-depois"><span>📷 Depois</span></div>
+                <input type="file" accept="image/*" id="f-depois">
+              </div>
+            </div>
+          </div>
+        </div>
 
-      // A partir daqui, todas as rotas exigem login.
-      const user = requireAuth(req, res);
-      if (!user) return;
+        <label>Observações</label>
+        <textarea id="f-obs" placeholder="Opcional"></textarea>
 
-      // ---- Usuários (só admin) ----
-      if (urlPath === "/api/users") {
-        if (method === "GET") {
-          if (!requireAdmin(req, res)) return;
-          return sendJSON(res, 200, state.users.map(usuarioPublico));
-        }
-        if (method === "POST") {
-          if (!requireAdmin(req, res)) return;
-          const body = await readJSON(req);
-          const nome = String(body.nome || "").trim();
-          const usuario = String(body.usuario || "").trim();
-          const senha = String(body.senha || "");
-          const role = body.role === "admin" ? "admin" : "encarregado";
-          const cidadeId = role === "encarregado" && body.cidadeId ? String(body.cidadeId) : null;
-          if (!nome || !usuario || senha.length < 4) {
-            return sendJSON(res, 400, { erro: "Preencha nome, usuário e uma senha com pelo menos 4 caracteres." });
-          }
-          if (state.users.some((u) => u.usuario.toLowerCase() === usuario.toLowerCase())) {
-            return sendJSON(res, 409, { erro: "Já existe um usuário com esse nome de login." });
-          }
-          if (cidadeId && !state.cidades.some((c) => c.id === cidadeId)) {
-            return sendJSON(res, 400, { erro: "Cidade selecionada não existe." });
-          }
-          const novo = {
-            id: crypto.randomUUID(),
-            nome,
-            usuario,
-            senha: hashSenha(senha),
-            role,
-            cidadeId,
-            criadoEm: new Date().toISOString(),
-          };
-          state.users.push(novo);
-          persist();
-          return sendJSON(res, 201, usuarioPublico(novo));
-        }
-      }
+        <button class="btn btn-primary" id="btn-salvar" onclick="salvarRegistro()">Salvar Registro</button>
+        <div class="note">Os registros ficam salvos na nuvem — toda a equipe vê os mesmos dados. Use a aba "Exportar" no fim do mês para gerar a planilha de medição e o relatório fotográfico.</div>
+      </div>
+    </div>
 
-      const userIdMatch = urlPath.match(/^\/api\/users\/([^/]+)$/);
-      if (userIdMatch && method === "PUT") {
-        if (!requireAdmin(req, res)) return;
-        const id = decodeURIComponent(userIdMatch[1]);
-        const alvo = state.users.find((u) => u.id === id);
-        if (!alvo) return sendJSON(res, 404, { erro: "Usuário não encontrado." });
-        const body = await readJSON(req);
-        if (body.cidadeId !== undefined) {
-          const cidadeId = body.cidadeId ? String(body.cidadeId) : null;
-          if (cidadeId && !state.cidades.some((c) => c.id === cidadeId)) {
-            return sendJSON(res, 400, { erro: "Cidade selecionada não existe." });
-          }
-          alvo.cidadeId = cidadeId;
-        }
-        persist();
-        return sendJSON(res, 200, usuarioPublico(alvo));
-      }
-      if (userIdMatch && method === "DELETE") {
-        if (!requireAdmin(req, res)) return;
-        const id = decodeURIComponent(userIdMatch[1]);
-        if (id === user.id) return sendJSON(res, 400, { erro: "Você não pode remover seu próprio usuário." });
-        const alvo = state.users.find((u) => u.id === id);
-        if (!alvo) return sendJSON(res, 404, { erro: "Usuário não encontrado." });
-        const outrosAdmins = state.users.some((u) => u.role === "admin" && u.id !== id);
-        if (alvo.role === "admin" && !outrosAdmins) {
-          return sendJSON(res, 400, { erro: "Precisa existir pelo menos um administrador." });
-        }
-        state.users = state.users.filter((u) => u.id !== id);
-        state.sessions = state.sessions.filter((s) => s.userId !== id);
-        persist();
-        return sendJSON(res, 200, { ok: true });
-      }
+    <!-- LISTA -->
+    <div class="view" id="view-lista">
+      <div class="stats">
+        <div class="stat"><b id="st-total">0</b><span>registros</span></div>
+        <div class="stat"><b id="st-ext">0</b><span id="st-ext-label">m² medidos no mês</span></div>
+        <div class="stat"><b id="st-cidades">0</b><span>cidades</span></div>
+      </div>
+      <div id="st-valor-box" class="note" style="display:none;margin-bottom:12px;">Custo mensal (Equipe Padrão) no período: <b id="st-valor">R$ 0,00</b></div>
+      <div class="filters">
+        <select id="filtro-mes"></select>
+        <select id="filtro-cidade"><option value="">Todas as cidades</option></select>
+      </div>
+      <div id="lista-registros"></div>
+    </div>
 
-      // ---- Config (identificação da empresa) ----
-      if (urlPath === "/api/config") {
-        if (method === "GET") return sendJSON(res, 200, state.config);
-        if (method === "PUT") {
-          if (!requireAdmin(req, res)) return;
-          const body = await readJSON(req);
-          state.config = {
-            empresa: String(body.empresa || "").trim(),
-            cnpj: String(body.cnpj || "").trim(),
-            contrato: String(body.contrato || "").trim(),
-          };
-          persist();
-          return sendJSON(res, 200, state.config);
-        }
-      }
+    <!-- METAS -->
+    <div class="view" id="view-metas">
+      <div class="card">
+        <h2>Metas por serviço</h2>
+        <label>Cidade</label>
+        <select id="metas-cidade" onchange="renderMetas()"></select>
 
-      // ---- Cidades (só admin: lista completa, contratos e documentos) ----
-      // Um encarregado não enxerga a lista de cidades nem os contratos —
-      // ele só sabe o nome da própria cidade, devolvido em /api/me.
-      if (urlPath === "/api/cidades" || urlPath.startsWith("/api/cidades/")) {
-        if (!requireAdmin(req, res)) return;
-      }
+        <!-- Só o administrador vê/edita: como a meta dessa cidade é contada -->
+        <div id="metas-periodo-config" class="hidden" style="margin-top:12px;padding:12px;border:1px solid var(--border);border-radius:10px;background:#F9FAFB;">
+          <label style="margin-top:0;">Período da meta nesta cidade</label>
+          <select id="mp-tipo" onchange="mostrarCamposPeriodoMeta()">
+            <option value="semanal">Semanal (toda semana)</option>
+            <option value="mensal">Mensal (a partir de um dia)</option>
+            <option value="datas">Datas específicas</option>
+          </select>
+          <div id="mp-grp-semanal">
+            <label>A semana começa na</label>
+            <select id="mp-dia-semana">
+              <option value="1">Segunda-feira</option><option value="2">Terça-feira</option><option value="3">Quarta-feira</option>
+              <option value="4">Quinta-feira</option><option value="5">Sexta-feira</option><option value="6">Sábado</option><option value="0">Domingo</option>
+            </select>
+          </div>
+          <div id="mp-grp-mensal" class="hidden">
+            <label>O período começa todo dia</label>
+            <input type="number" id="mp-dia-inicio" min="1" max="31" step="1" placeholder="Ex: 20">
+            <div class="note">Ex: dia 20 → de 20/09 a 19/10, depois de 20/10 a 19/11, e assim por diante.</div>
+          </div>
+          <div id="mp-grp-datas" class="hidden">
+            <div class="row2">
+              <div><label>Data inicial</label><input type="date" id="mp-inicio"></div>
+              <div><label>Data final</label><input type="date" id="mp-fim"></div>
+            </div>
+          </div>
+          <button class="btn btn-primary" style="margin-top:10px;" onclick="salvarPeriodoMeta()">Salvar período</button>
+        </div>
 
-      // Cada cidade é um objeto {id, nome, contrato, responsavel, telefone}.
-      // O nome não muda depois de criado, para não desalinhar com os
-      // registros já lançados (que guardam a cidade como texto).
-      if (urlPath === "/api/cidades") {
-        if (method === "GET") return sendJSON(res, 200, state.cidades);
-        if (method === "POST") {
-          const body = await readJSON(req);
-          const nome = String(body.nome || "").trim();
-          if (!nome) return sendJSON(res, 400, { erro: "Informe o nome da cidade." });
-          if (state.cidades.some((c) => c.nome.toLowerCase() === nome.toLowerCase())) {
-            return sendJSON(res, 409, { erro: "Essa cidade já está cadastrada." });
-          }
-          const nova = {
-            id: crypto.randomUUID(),
-            nome,
-            contrato: String(body.contrato || "").trim(),
-            responsavel: String(body.responsavel || "").trim(),
-            telefone: String(body.telefone || "").trim(),
-            documentos: [],
-          };
-          state.cidades.push(nova);
-          state.cidades.sort((a, b) => a.nome.localeCompare(b.nome, "pt-BR"));
-          persist();
-          return sendJSON(res, 201, state.cidades);
-        }
-      }
+        <div id="metas-nav">
+          <div class="row2" style="margin:12px 0 10px;">
+            <button class="btn btn-outline" style="margin-top:0;" onclick="mudarPeriodoMeta(-1)" id="metas-btn-ant">◀ Período anterior</button>
+            <button class="btn btn-outline" style="margin-top:0;" onclick="mudarPeriodoMeta(1)" id="metas-btn-prox">Próximo período ▶</button>
+          </div>
+          <label>Ou escolha qualquer dia do período desejado</label>
+          <input type="date" id="metas-data" onchange="renderMetas()">
+        </div>
+        <div class="note" id="metas-periodo" style="margin-top:10px;font-weight:600;"></div>
+      </div>
+      <div id="metas-lista"></div>
+      <div class="note">Defina a meta de cada serviço para a cidade escolhida acima — o valor é o total a cumprir dentro de UM período da cidade (semana, mês do contrato ou as datas escolhidas) (na unidade cadastrada para ele — m², m, ha ou R$ — pode deixar em branco os que não quer acompanhar). Cada cidade tem suas próprias metas. A barra enche sozinha de acordo com os registros lançados em "+ Registro" dentro do período e da cidade selecionados.</div>
+    </div>
 
-      // ---- Documentos da cidade (Contrato / Aditivo de contrato) ----
-      const cidadeDocsMatch = urlPath.match(/^\/api\/cidades\/([^/]+)\/documentos$/);
-      if (cidadeDocsMatch && method === "POST") {
-        const cidadeId = decodeURIComponent(cidadeDocsMatch[1]);
-        const alvo = state.cidades.find((c) => c.id === cidadeId);
-        if (!alvo) return sendJSON(res, 404, { erro: "Cidade não encontrada." });
-        const body = await readJSON(req);
-        const tipo = body.tipo === "aditivo" ? "aditivo" : "contrato";
-        const titulo = String(body.titulo || "").trim();
-        const url = salvarArquivoBase64(body.arquivo);
-        if (!url) return sendJSON(res, 400, { erro: "Anexe um arquivo em PDF, JPG, PNG ou WEBP." });
-        const doc = {
-          id: crypto.randomUUID(),
-          tipo,
-          titulo,
-          nomeArquivo: String(body.nomeArquivo || "").trim(),
-          url,
-          criadoPor: user.nome,
-          criadoEm: new Date().toISOString(),
-        };
-        if (!Array.isArray(alvo.documentos)) alvo.documentos = [];
-        alvo.documentos.push(doc);
-        persist();
-        return sendJSON(res, 201, state.cidades);
-      }
-      const cidadeDocMatch = urlPath.match(/^\/api\/cidades\/([^/]+)\/documentos\/([^/]+)$/);
-      if (cidadeDocMatch && method === "DELETE") {
-        const cidadeId = decodeURIComponent(cidadeDocMatch[1]);
-        const docId = decodeURIComponent(cidadeDocMatch[2]);
-        const alvo = state.cidades.find((c) => c.id === cidadeId);
-        if (!alvo) return sendJSON(res, 404, { erro: "Cidade não encontrada." });
-        const doc = (alvo.documentos || []).find((d) => d.id === docId);
-        if (doc) removerFotoSeForUpload(doc.url);
-        alvo.documentos = (alvo.documentos || []).filter((d) => d.id !== docId);
-        persist();
-        return sendJSON(res, 200, state.cidades);
-      }
+    <!-- CIDADES -->
+    <div class="view" id="view-cidades">
+      <div class="card">
+        <h2>Cidades cadastradas</h2>
+        <label>Nome da cidade</label>
+        <input type="text" id="nova-cidade" placeholder="Ex: São José do Rio">
+        <label>Contrato / Nº processo</label>
+        <input type="text" id="nova-cidade-contrato" placeholder="Ex: Contrato 012/2026">
+        <label>Responsável / encarregado fixo</label>
+        <input type="text" id="nova-cidade-responsavel" placeholder="Ex: Carlos">
+        <label>Telefone de contato</label>
+        <input type="text" id="nova-cidade-telefone" placeholder="Ex: (11) 98888-7777" onkeydown="if(event.key==='Enter'){event.preventDefault();adicionarCidade();}">
+        <button class="btn btn-primary" onclick="adicionarCidade()">+ Adicionar cidade</button>
+        <div class="note">Cadastre aqui as cidades onde a empresa atua. Elas aparecem para escolher no campo "Cidade" ao criar um novo registro em "+ Registro" — assim evita erro de digitação e nomes diferentes para a mesma cidade. Contrato, responsável e telefone são opcionais e podem ser editados depois, direto na lista abaixo.</div>
+      </div>
+      <div id="cidades-lista"></div>
+    </div>
 
-      const cidadeMatch = urlPath.match(/^\/api\/cidades\/([^/]+)$/);
-      if (cidadeMatch && method === "PUT") {
-        const id = decodeURIComponent(cidadeMatch[1]);
-        const alvo = state.cidades.find((c) => c.id === id);
-        if (!alvo) return sendJSON(res, 404, { erro: "Cidade não encontrada." });
-        const body = await readJSON(req);
-        if (body.contrato !== undefined) alvo.contrato = String(body.contrato || "").trim();
-        if (body.responsavel !== undefined) alvo.responsavel = String(body.responsavel || "").trim();
-        if (body.telefone !== undefined) alvo.telefone = String(body.telefone || "").trim();
-        persist();
-        return sendJSON(res, 200, state.cidades);
-      }
-      if (cidadeMatch && method === "DELETE") {
-        const id = decodeURIComponent(cidadeMatch[1]);
-        const alvo = state.cidades.find((c) => c.id === id);
-        if (alvo) (alvo.documentos || []).forEach((d) => removerFotoSeForUpload(d.url));
-        state.cidades = state.cidades.filter((c) => c.id !== id);
-        state.ruas = state.ruas.filter((r) => r.cidadeId !== id); // remove também as ruas dessa cidade
-        if (alvo) delete state.metas[alvo.nome]; // remove também as metas dessa cidade
-        persist();
-        return sendJSON(res, 200, state.cidades);
-      }
+    <!-- SERVIÇOS (admin) -->
+    <div class="view" id="view-servicos">
+      <div class="card">
+        <h2>Novo serviço</h2>
+        <label>Nome do serviço</label>
+        <input type="text" id="novo-servico-nome" placeholder="Ex: Poda de Árvores" onkeydown="if(event.key==='Enter'){event.preventDefault();adicionarServico();}">
+        <label>Unidade de medida</label>
+        <select id="novo-servico-unidade">
+          <option value="m²">m² — área (extensão × largura)</option>
+          <option value="m">m — comprimento linear (só extensão)</option>
+          <option value="ha">ha — área em hectares (extensão × largura)</option>
+          <option value="R$">R$ — valor fixo mensal (como "Equipe Padrão")</option>
+        </select>
+        <button class="btn btn-primary" onclick="adicionarServico()">+ Adicionar serviço</button>
+        <div class="note">Cadastre aqui os serviços executados pela equipe. Escolha "m²" ou "ha" para serviços medidos por área, "m" para serviços medidos só por comprimento (sem largura, como meio-fio), ou "R$" para custos fixos mensais (ajuda de custo, como "Equipe Padrão"). Depois de criar o serviço, cadastre o valor dele em cada cidade logo abaixo — cada cidade tem seu próprio contrato, então o mesmo serviço pode custar um valor diferente (ou nem existir) em cada uma. Um serviço só aparece pra escolher no "+ Registro" nas cidades onde ele tiver um valor cadastrado.</div>
+      </div>
+      <div id="servicos-lista"></div>
+    </div>
 
-      // ---- Ruas ----
-      // Só o administrador cadastra ruas (nome, número, bairro, vinculadas
-      // a uma cidade). O encarregado só ENXERGA e ESCOLHE, na cidade dele —
-      // não digita rua livremente, para manter a lista padronizada.
-      if (urlPath === "/api/ruas") {
-        if (method === "GET") {
-          if (user.role === "admin") {
-            const url = new URL(req.url, "http://x");
-            const filtroCidadeId = url.searchParams.get("cidadeId");
-            const lista = filtroCidadeId ? state.ruas.filter((r) => r.cidadeId === filtroCidadeId) : state.ruas;
-            return sendJSON(res, 200, lista);
-          }
-          const minhaCidadeId = user.cidadeId || null;
-          return sendJSON(res, 200, minhaCidadeId ? state.ruas.filter((r) => r.cidadeId === minhaCidadeId) : []);
-        }
-        if (method === "POST") {
-          if (!requireAdmin(req, res)) return;
-          const body = await readJSON(req);
-          const cidadeId = String(body.cidadeId || "");
-          const nome = String(body.nome || "").trim();
-          if (!cidadeId || !state.cidades.some((c) => c.id === cidadeId)) {
-            return sendJSON(res, 400, { erro: "Selecione uma cidade válida." });
-          }
-          if (!nome) return sendJSON(res, 400, { erro: "Informe o nome da rua." });
-          const nova = {
-            id: crypto.randomUUID(),
-            cidadeId,
-            nome,
-            numero: String(body.numero || "").trim(),
-            bairro: String(body.bairro || "").trim(),
-            criadoEm: new Date().toISOString(),
-          };
-          state.ruas.push(nova);
-          persist();
-          return sendJSON(res, 201, state.ruas.filter((r) => r.cidadeId === cidadeId));
-        }
-      }
-      const ruaMatch = urlPath.match(/^\/api\/ruas\/([^/]+)$/);
-      if (ruaMatch && method === "PUT") {
-        if (!requireAdmin(req, res)) return;
-        const id = decodeURIComponent(ruaMatch[1]);
-        const alvo = state.ruas.find((r) => r.id === id);
-        if (!alvo) return sendJSON(res, 404, { erro: "Rua não encontrada." });
-        const body = await readJSON(req);
-        if (body.nome !== undefined) alvo.nome = String(body.nome || "").trim();
-        if (body.numero !== undefined) alvo.numero = String(body.numero || "").trim();
-        if (body.bairro !== undefined) alvo.bairro = String(body.bairro || "").trim();
-        persist();
-        return sendJSON(res, 200, state.ruas.filter((r) => r.cidadeId === alvo.cidadeId));
-      }
-      if (ruaMatch && method === "DELETE") {
-        if (!requireAdmin(req, res)) return;
-        const id = decodeURIComponent(ruaMatch[1]);
-        const alvo = state.ruas.find((r) => r.id === id);
-        const cidadeId = alvo ? alvo.cidadeId : null;
-        state.ruas = state.ruas.filter((r) => r.id !== id);
-        persist();
-        return sendJSON(res, 200, cidadeId ? state.ruas.filter((r) => r.cidadeId === cidadeId) : []);
-      }
+    <!-- USUÁRIOS (admin) -->
+    <div class="view" id="view-usuarios">
+      <div class="card">
+        <h2>Novo usuário</h2>
+        <label>Nome</label>
+        <input type="text" id="us-nome" placeholder="Ex: Carlos Encarregado">
+        <label>Usuário (login)</label>
+        <input type="text" id="us-usuario" placeholder="Ex: carlos" autocapitalize="off">
+        <label>Senha</label>
+        <input type="text" id="us-senha" placeholder="Mínimo 4 caracteres">
+        <label>Tipo de acesso</label>
+        <select id="us-role" onchange="toggleUsCidade()">
+          <option value="encarregado">Encarregado (usa o app em campo)</option>
+          <option value="admin">Administrador (também gerencia usuários)</option>
+        </select>
+        <div id="grp-us-cidade">
+          <label>Cidade que vai atender</label>
+          <select id="us-cidade">
+            <option value="">Selecione a cidade...</option>
+          </select>
+        </div>
+        <button class="btn btn-primary" onclick="adicionarUsuario()">+ Adicionar usuário</button>
+        <div class="note">Crie um login para cada encarregado. Um encarregado só vê e lança registros da cidade escolhida acima — não vê a aba Cidades nem consegue alterar metas. O administrador continua com acesso total a tudo.</div>
+      </div>
+      <div id="usuarios-lista"></div>
+    </div>
 
-      // ---- Serviços ----
-      // Qualquer um logado pode VER a lista (precisa pra escolher o serviço
-      // em "+ Registro" e ver as metas); só o administrador cadastra, edita
-      // a unidade ou remove. O nome não muda depois de criado, pra não
-      // desalinhar dos registros e metas já lançados (que guardam o serviço
-      // pelo nome, não por id).
-      // O valor cobrado (valorUnitario e precosPorCidade — cada cidade pode
-      // ter um valor diferente pro mesmo serviço, por causa de contratos
-      // diferentes) é informação sensível de preço — só o administrador pode
-      // ver, então é removido da resposta pra quem não é admin (mesmo que
-      // peçam a API direto, não só pela tela).
-      if (urlPath === "/api/servicos") {
-        if (method === "GET") {
-          const lista = user.role === "admin" ? state.servicos : state.servicos.map((s) => {
-            const { valorUnitario, precosPorCidade, ...semValor } = s;
-            // Não manda os valores (sensível, só admin vê), mas manda quais
-            // cidades têm esse serviço "ativado" (têm algum valor cadastrado)
-            // — sem isso ninguém além do admin conseguiria saber quais
-            // serviços aparecem pra lançar em cada cidade.
-            return { ...semValor, cidadesDisponiveis: Object.keys(precosPorCidade || {}) };
-          });
-          return sendJSON(res, 200, lista);
-        }
-        if (method === "POST") {
-          if (!requireAdmin(req, res)) return;
-          const body = await readJSON(req);
-          const nome = String(body.nome || "").trim();
-          const unidade = String(body.unidade || "").trim();
-          const valorUnitario = body.valorUnitario !== undefined && body.valorUnitario !== "" ? parseFloat(body.valorUnitario) || 0 : 0;
-          if (!nome) return sendJSON(res, 400, { erro: "Informe o nome do serviço." });
-          if (!unidade) return sendJSON(res, 400, { erro: "Informe a unidade de medida." });
-          if (state.servicos.some((s) => s.nome.toLowerCase() === nome.toLowerCase())) {
-            return sendJSON(res, 409, { erro: "Esse serviço já está cadastrado." });
-          }
-          const novo = { id: crypto.randomUUID(), nome, unidade, valorUnitario, precosPorCidade: {}, criadoEm: new Date().toISOString() };
-          state.servicos.push(novo);
-          persist();
-          return sendJSON(res, 201, state.servicos);
-        }
-      }
-      const servicoMatch = urlPath.match(/^\/api\/servicos\/([^/]+)$/);
-      if (servicoMatch && method === "PUT") {
-        if (!requireAdmin(req, res)) return;
-        const id = decodeURIComponent(servicoMatch[1]);
-        const alvo = state.servicos.find((s) => s.id === id);
-        if (!alvo) return sendJSON(res, 404, { erro: "Serviço não encontrado." });
-        const body = await readJSON(req);
-        if (body.unidade !== undefined) {
-          const unidade = String(body.unidade || "").trim();
-          if (!unidade) return sendJSON(res, 400, { erro: "Informe a unidade de medida." });
-          alvo.unidade = unidade;
-        }
-        if (body.valorUnitario !== undefined) {
-          alvo.valorUnitario = body.valorUnitario === "" ? 0 : parseFloat(body.valorUnitario) || 0;
-        }
-        // Valor específico de uma cidade pra esse serviço (contratos
-        // diferentes cobram valores diferentes pelo mesmo serviço). Enviar
-        // precoValor vazio remove a customização (volta a usar o padrão).
-        if (body.precoCidadeId !== undefined) {
-          const cidadeId = String(body.precoCidadeId || "").trim();
-          const cidadeObj = state.cidades.find((c) => c.id === cidadeId);
-          if (!cidadeObj) return sendJSON(res, 400, { erro: "Cidade não encontrada." });
-          if (!alvo.precosPorCidade) alvo.precosPorCidade = {};
-          if (body.precoValor === undefined || body.precoValor === "") {
-            delete alvo.precosPorCidade[cidadeId];
-          } else {
-            alvo.precosPorCidade[cidadeId] = parseFloat(body.precoValor) || 0;
-          }
-        }
-        persist();
-        return sendJSON(res, 200, state.servicos);
-      }
-      if (servicoMatch && method === "DELETE") {
-        if (!requireAdmin(req, res)) return;
-        const id = decodeURIComponent(servicoMatch[1]);
-        const alvo = state.servicos.find((s) => s.id === id);
-        state.servicos = state.servicos.filter((s) => s.id !== id);
-        if (alvo) {
-          // remove a meta desse serviço em todas as cidades
-          for (const cidadeNome of Object.keys(state.metas)) {
-            if (state.metas[cidadeNome]) delete state.metas[cidadeNome][alvo.nome];
-          }
-        }
-        persist();
-        return sendJSON(res, 200, state.servicos);
-      }
+    <!-- EXPORTAR -->
+    <div class="view" id="view-exportar">
+      <div class="card">
+        <h2>Identificação (usada nos relatórios)</h2>
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;">
+          <img src="/img/logo.jpg" style="width:44px;height:44px;object-fit:contain;border-radius:6px;border:1px solid var(--border);background:#fff;padding:3px;">
+          <span style="font-size:12px;color:var(--muted);">Logomarca já aplicada no timbrado ✓</span>
+        </div>
+        <label>Nome da Construtora</label>
+        <input type="text" id="cfg-empresa" placeholder="Ex: Construtora Marcos Ltda" onchange="salvarConfig()">
+        <label>CNPJ</label>
+        <input type="text" id="cfg-cnpj" placeholder="Ex: 00.000.000/0001-00" onchange="salvarConfig()">
+        <label>Contrato / Nº Processo</label>
+        <input type="text" id="cfg-contrato" placeholder="Ex: Contrato 012/2026" onchange="salvarConfig()">
+        <div class="note">Preenchido uma vez só — fica salvo na nuvem e entra automaticamente na planilha e no relatório fotográfico, para todo mundo.</div>
+      </div>
 
-      // ---- Metas ----
-      // Cada cidade tem seu próprio conjunto de metas por serviço (uma
-      // cidade pode ter uma meta bem diferente da outra). Qualquer um
-      // logado pode VER o progresso da cidade dele; só o administrador
-      // define o valor da meta, e pode escolher qualquer cidade. Um
-      // encarregado só enxerga a própria cidade, mesmo que tente pedir
-      // outra pela API.
-      if (urlPath === "/api/metas") {
-        if (method === "GET") {
-          const url = new URL(req.url, "http://x");
-          let cidade = url.searchParams.get("cidade") || "";
-          if (user.role !== "admin") {
-            cidade = cidadeDoUsuario(user) || "";
-          }
-          if (!cidade) return sendJSON(res, 200, {});
-          return sendJSON(res, 200, state.metas[cidade] || {});
-        }
-        if (method === "PUT") {
-          if (!requireAdmin(req, res)) return;
-          const body = await readJSON(req);
-          const cidade = String(body.cidade || "").trim();
-          const servico = String(body.servico || "");
-          const valor = parseFloat(body.valor);
-          if (!cidade) return sendJSON(res, 400, { erro: "Selecione uma cidade." });
-          if (!servico) return sendJSON(res, 400, { erro: "Serviço não informado." });
-          if (!state.metas[cidade]) state.metas[cidade] = {};
-          if (valor > 0) state.metas[cidade][servico] = valor;
-          else delete state.metas[cidade][servico];
-          persist();
-          return sendJSON(res, 200, state.metas[cidade]);
-        }
-      }
+      <div class="card">
+        <h2>Exportar do mês selecionado</h2>
+        <label>Mês de referência</label>
+        <select id="exp-mes" onchange="limparPeriodoExport()"></select>
 
-      // ---- Baixar fotos em ZIP (só administrador) ----
-      // Usa os mesmos filtros da aba Exportar (cidade + mês OU período) e
-      // organiza as fotos em pastas: Cidade/AAAA-MM-DD/Rua_Serviço_ANTES.jpg
-      // (a data no formato ano-mês-dia pra as pastas ficarem em ordem
-      // cronológica quando abertas no computador).
-      if (method === "GET" && urlPath === "/api/exportar/fotos.zip") {
-        if (user.role !== "admin") return sendJSON(res, 403, { erro: "Somente administradores" });
-        const url = new URL(req.url, "http://x");
-        const fCidade = url.searchParams.get("cidade") || "";
-        const fMes = url.searchParams.get("mes") || "";
-        const fInicio = url.searchParams.get("inicio") || "";
-        const fFim = url.searchParams.get("fim") || "";
-        const usaPeriodo = !!(fInicio || fFim);
+        <label style="margin-top:14px;">Ou escolha um período específico</label>
+        <div class="row2">
+          <div>
+            <label style="font-size:12px;">Data inicial</label>
+            <input type="date" id="exp-data-inicio" onchange="usarPeriodoExport()">
+          </div>
+          <div>
+            <label style="font-size:12px;">Data final</label>
+            <input type="date" id="exp-data-fim" onchange="usarPeriodoExport()">
+          </div>
+        </div>
+        <div class="note" id="exp-periodo-nota" style="margin-top:-4px;">Preencher a data inicial e/ou final substitui o mês escolhido acima.</div>
 
-        const limpar = (s) =>
-          String(s || "")
-            .replace(/[\\/:*?"<>|\u0000-\u001f]/g, "")
-            .replace(/\s+/g, " ")
-            .trim()
-            .slice(0, 80) || "sem-nome";
+        <label style="margin-top:14px;">Cidade</label>
+        <select id="exp-cidade"><option value="">Todas as cidades</option></select>
 
-        const selecionados = state.entries
-          .filter((e) => (e.fotoAntes || e.fotoDepois))
-          .filter((e) => !fCidade || e.cidade === fCidade)
-          .filter((e) => {
-            const d = e.data || "";
-            if (usaPeriodo) return (!fInicio || d >= fInicio) && (!fFim || d <= fFim);
-            return !fMes || d.slice(0, 7) === fMes;
-          })
-          .sort((a, b) => (a.cidade || "").localeCompare(b.cidade || "") || (a.data || "").localeCompare(b.data || ""));
+        <button class="btn btn-primary" onclick="exportarMedicao()">📄 Gerar Medição (imprimir/PDF)</button>
+        <button class="btn btn-secondary" onclick="exportarFotos()">🖼 Gerar Relatório Fotográfico (imprimir/PDF)</button>
+        <button class="btn btn-outline" onclick="exportarCSV()">⬇ Baixar Planilha (CSV)</button>
+        <button class="btn btn-outline" onclick="baixarFotosZip()">🗂 Baixar Fotos (ZIP)</button>
+        <div class="note">
+          Os relatórios saem do <b>mesmo registro</b> — a equipe preenche a rua, a medição e as fotos uma única vez em "+ Registro", juntando os lançamentos de todo mundo. A medição, o relatório fotográfico e a planilha são gerados automaticamente a partir disso.<br><br>
+          "Gerar Medição" abre pronta, com o mesmo timbrado, tabela completa e resumo por serviço da planilha — use "Imprimir → Salvar como PDF".<br>
+          O relatório fotográfico abre com identificação, fotos de antes/depois e campo de assinatura — use "Imprimir → Salvar como PDF".<br>
+          O CSV é útil se você quiser colar os dados na planilha Excel "Medição Mensal".<br>
+          "Baixar Fotos (ZIP)" baixa as fotos originais do filtro escolhido, separadas em pastas por cidade e por data (ex: <i>Leandro Ferreira / 2026-09-22 / Rua X - Varrição - ANTES.jpg</i>).
+        </div>
+      </div>
 
-        const arquivos = [];
-        const nomesUsados = new Set();
-        for (const e of selecionados) {
-          const pasta = limpar(e.cidade) + "/" + limpar(e.data);
-          let base = limpar(e.rua || "Sem rua");
-          if (e.numero) base += " " + limpar(e.numero);
-          base += " - " + limpar(e.servico);
-          for (const [campo, rotulo] of [["fotoAntes", "ANTES"], ["fotoDepois", "DEPOIS"]]) {
-            const u = e[campo];
-            if (!u || typeof u !== "string" || !u.startsWith("/uploads/")) continue;
-            const arquivoNoDisco = path.join(UPLOADS_DIR, path.basename(u));
-            const ext = path.extname(u) || ".jpg";
-            let nome = `${pasta}/${base} - ${rotulo}${ext}`;
-            let n = 2;
-            while (nomesUsados.has(nome)) nome = `${pasta}/${base} - ${rotulo} (${n++})${ext}`;
-            nomesUsados.add(nome);
-            arquivos.push({ nome, caminho: arquivoNoDisco });
-          }
-        }
+      <div class="card hidden" id="card-otimizar-fotos">
+        <h2>Deixar o relatório fotográfico mais rápido</h2>
+        <div class="note" id="otimizar-fotos-texto"></div>
+        <button class="btn btn-primary" id="btn-otimizar-fotos" onclick="otimizarFotosAntigas()">⚡ Otimizar fotos antigas</button>
+        <div class="note" id="otimizar-fotos-progresso"></div>
+      </div>
+    </div>
+  </main>
+</div>
 
-        if (arquivos.length === 0) {
-          return sendJSON(res, 404, { erro: "Nenhuma foto encontrada pra esse filtro." });
-        }
+<div class="toast" id="toast"></div>
 
-        const periodo = usaPeriodo ? `${fInicio || "inicio"}_a_${fFim || "fim"}` : fMes || "todos";
-        const nomeZip = `Fotos_${limpar(fCidade || "Todas as cidades")}_${periodo}.zip`;
-        const nomeAscii = nomeZip.normalize("NFD").replace(/[^\x20-\x7e]/g, "").replace(/"/g, "");
-        res.writeHead(200, {
-          "Content-Type": "application/zip",
-          "Content-Disposition": `attachment; filename="${nomeAscii}"; filename*=UTF-8''${encodeURIComponent(nomeZip)}`,
-          "Cache-Control": "no-store",
-        });
-        try {
-          await escreverZip(res, arquivos);
-        } catch (e) {
-          // quem pediu fechou a conexão no meio (cancelou o download) — só encerra
-          res.destroy();
-        }
-        return;
-      }
+<div class="modal-overlay hidden" id="modal-overlay">
+  <div class="modal-box">
+    <p id="modal-msg"></p>
+    <div class="modal-actions">
+      <button class="btn btn-outline" id="modal-cancel" style="margin-top:0;">Cancelar</button>
+      <button class="btn btn-primary" id="modal-confirm" style="margin-top:0;background:var(--danger);">Excluir</button>
+    </div>
+  </div>
+</div>
 
-      // ---- Registros (entries) ----
-      // O administrador vê e mexe em tudo. Um encarregado só vê, cria e
-      // apaga registros da cidade que foi atribuída a ele — mesmo que
-      // tente forçar outra cidade pela API, o servidor ignora e usa a
-      // cidade cadastrada no perfil dele.
-      const minhaCidade = user.role === "admin" ? null : cidadeDoUsuario(user);
-      const podeVerRegistro = (e) => user.role === "admin" || e.cidade === minhaCidade;
-      if (urlPath === "/api/entries") {
-        if (method === "GET") {
-          const lista = user.role === "admin" ? state.entries : state.entries.filter((e) => e.cidade === minhaCidade);
-          return sendJSON(res, 200, lista);
-        }
-        if (method === "POST") {
-          const body = await readJSON(req);
-          let cidade = String(body.cidade || "").trim();
-          let cidadeId = null;
-          if (user.role !== "admin") {
-            if (!minhaCidade) {
-              return sendJSON(res, 403, { erro: "Você ainda não tem uma cidade atribuída. Fale com o administrador." });
-            }
-            cidade = minhaCidade;
-            cidadeId = user.cidadeId || null;
-          } else {
-            const cidadeObj = state.cidades.find((c) => c.nome === cidade);
-            cidadeId = cidadeObj ? cidadeObj.id : null;
-          }
-          // O serviço tem que ser um dos já cadastrados (aba Serviços) — guardamos
-          // a unidade de medida junto no registro (denormalizada), pra manter o
-          // histórico correto mesmo se o serviço mudar depois.
-          const servico = String(body.servico || "").trim();
-          const servicoObj = servico ? state.servicos.find((s) => s.nome === servico) : null;
-          // Serviço "R$" (custo mensal fixo, tipo "Equipe Padrão") é uma ajuda
-          // de custo da cidade — só o administrador lança, e não tem rua (não
-          // tem local físico, só precisa entrar na Medição do mês).
-          const isValorFixo = servicoObj && servicoObj.unidade === "R$";
-          if (isValorFixo && user.role !== "admin") {
-            return sendJSON(res, 403, { erro: "Apenas o administrador pode lançar esse serviço (custo mensal fixo)." });
-          }
-          // A rua tem que ser uma das já cadastradas (pelo administrador) para
-          // essa cidade — o campo é sempre um ruaId, nunca texto livre, para
-          // manter a lista padronizada e evitar nomes divergentes.
-          const ruaId = String(body.ruaId || "").trim();
-          const ruaObj = ruaId ? state.ruas.find((r) => r.id === ruaId && r.cidadeId === cidadeId) : null;
-          const data = String(body.data || "").trim();
-          if (!cidade || (!ruaObj && !isValorFixo) || !servicoObj || !data) {
-            return sendJSON(res, 400, { erro: "Preencha ao menos Cidade, Rua, Serviço e Data. Verifique se a rua e o serviço estão cadastrados." });
-          }
-          const entry = {
-            id: crypto.randomUUID(),
-            cidade,
-            ruaId: ruaObj ? ruaObj.id : "",
-            rua: ruaObj ? ruaObj.nome : "",
-            numero: ruaObj ? ruaObj.numero || "" : "",
-            bairro: ruaObj ? ruaObj.bairro || "" : "",
-            extensao: body.extensao || "",
-            largura: body.largura || "",
-            lados: body.lados || "",
-            valor: body.valor || "",
-            servico,
-            unidade: servicoObj.unidade,
-            equipe: String(body.equipe || "").trim(),
-            data,
-            obs: String(body.obs || "").trim(),
-            // Foto nova (base64) ou, quando vem de "adicionar serviço" na
-            // edição, uma cópia da foto que o registro original já tinha.
-            fotoAntes: salvarFotoBase64(body.fotoAntes) || copiarFotoExistente(body.fotoAntes, podeVerRegistro),
-            fotoDepois: salvarFotoBase64(body.fotoDepois) || copiarFotoExistente(body.fotoDepois, podeVerRegistro),
-            // Versões leves (miniaturas) usadas na lista e no relatório
-            // fotográfico — geradas no celular junto com a foto completa.
-            fotoAntesMini: body.fotoAntes ? (salvarFotoBase64(body.fotoAntesMini) || copiarFotoExistente(body.fotoAntesMini, podeVerRegistro)) : null,
-            fotoDepoisMini: body.fotoDepois ? (salvarFotoBase64(body.fotoDepoisMini) || copiarFotoExistente(body.fotoDepoisMini, podeVerRegistro)) : null,
-            criadoPor: user.nome,
-            criadoEm: new Date().toISOString(),
-          };
-          state.entries.push(entry);
-          persist();
-          return sendJSON(res, 201, entry);
-        }
-      }
-      const entryMatch = urlPath.match(/^\/api\/entries\/([^/]+)$/);
-      if (entryMatch && method === "PUT") {
-        const id = decodeURIComponent(entryMatch[1]);
-        const alvo = state.entries.find((e) => e.id === id);
-        if (!alvo) return sendJSON(res, 404, { erro: "Registro não encontrado." });
-        if (user.role !== "admin" && alvo.cidade !== minhaCidade) {
-          return sendJSON(res, 403, { erro: "Você só pode editar registros da sua cidade." });
-        }
-        const body = await readJSON(req);
-
-        // A cidade só muda de verdade para o administrador — o encarregado
-        // continua preso à própria cidade, igual acontece ao criar (POST).
-        let cidade = alvo.cidade;
-        let cidadeId = null;
-        if (user.role === "admin") {
-          if (body.cidade !== undefined) cidade = String(body.cidade || "").trim();
-          const cidadeObj = state.cidades.find((c) => c.nome === cidade);
-          cidadeId = cidadeObj ? cidadeObj.id : null;
-        } else {
-          cidade = minhaCidade;
-          cidadeId = user.cidadeId || null;
-        }
-
-        const servico = body.servico !== undefined ? String(body.servico || "").trim() : alvo.servico;
-        const servicoObj = servico ? state.servicos.find((s) => s.nome === servico) : null;
-        // Serviço "R$" (custo mensal fixo, tipo "Equipe Padrão") é uma ajuda
-        // de custo — só o administrador mexe nesses registros, e não precisa
-        // de rua (nem o próprio registro já editado, nem trocar pra um).
-        const isValorFixo = servicoObj && servicoObj.unidade === "R$";
-        if ((isValorFixo || alvo.unidade === "R$") && user.role !== "admin") {
-          return sendJSON(res, 403, { erro: "Apenas o administrador pode editar esse serviço (custo mensal fixo)." });
-        }
-
-        const ruaId = body.ruaId !== undefined ? String(body.ruaId || "").trim() : alvo.ruaId;
-        const ruaObj = ruaId ? state.ruas.find((r) => r.id === ruaId && r.cidadeId === cidadeId) : null;
-
-        const data = body.data !== undefined ? String(body.data || "").trim() : alvo.data;
-
-        if (!cidade || (!ruaObj && !isValorFixo) || !servicoObj || !data) {
-          return sendJSON(res, 400, { erro: "Preencha ao menos Cidade, Rua, Serviço e Data. Verifique se a rua e o serviço estão cadastrados." });
-        }
-
-        alvo.cidade = cidade;
-        alvo.ruaId = ruaObj ? ruaObj.id : "";
-        alvo.rua = ruaObj ? ruaObj.nome : "";
-        alvo.numero = ruaObj ? ruaObj.numero || "" : "";
-        alvo.bairro = ruaObj ? ruaObj.bairro || "" : "";
-        if (body.extensao !== undefined) alvo.extensao = body.extensao;
-        if (body.largura !== undefined) alvo.largura = body.largura;
-        if (body.lados !== undefined) alvo.lados = body.lados;
-        if (body.valor !== undefined) alvo.valor = body.valor;
-        alvo.servico = servico;
-        alvo.unidade = servicoObj.unidade;
-        if (body.equipe !== undefined) alvo.equipe = String(body.equipe || "").trim();
-        alvo.data = data;
-        if (body.obs !== undefined) alvo.obs = String(body.obs || "").trim();
-
-        // Fotos: só mexe se vier um valor novo de verdade (uma foto nova em
-        // base64, ou null explícito para remover) — se vier a mesma URL que
-        // já estava salva (foto não trocada), não faz nada.
-        if (body.fotoAntes !== undefined && body.fotoAntes !== alvo.fotoAntes) {
-          if (body.fotoAntes === null) {
-            removerFotoSeForUpload(alvo.fotoAntes);
-            removerFotoSeForUpload(alvo.fotoAntesMini);
-            alvo.fotoAntes = null;
-            alvo.fotoAntesMini = null;
-          } else {
-            const nova = salvarFotoBase64(body.fotoAntes);
-            if (nova) {
-              removerFotoSeForUpload(alvo.fotoAntes);
-              removerFotoSeForUpload(alvo.fotoAntesMini);
-              alvo.fotoAntes = nova;
-              alvo.fotoAntesMini = salvarFotoBase64(body.fotoAntesMini);
-            }
-          }
-        }
-        if (body.fotoDepois !== undefined && body.fotoDepois !== alvo.fotoDepois) {
-          if (body.fotoDepois === null) {
-            removerFotoSeForUpload(alvo.fotoDepois);
-            removerFotoSeForUpload(alvo.fotoDepoisMini);
-            alvo.fotoDepois = null;
-            alvo.fotoDepoisMini = null;
-          } else {
-            const nova = salvarFotoBase64(body.fotoDepois);
-            if (nova) {
-              removerFotoSeForUpload(alvo.fotoDepois);
-              removerFotoSeForUpload(alvo.fotoDepoisMini);
-              alvo.fotoDepois = nova;
-              alvo.fotoDepoisMini = salvarFotoBase64(body.fotoDepoisMini);
-            }
-          }
-        }
-
-        alvo.editadoPor = user.nome;
-        alvo.editadoEm = new Date().toISOString();
-
-        persist();
-        return sendJSON(res, 200, alvo);
-      }
-      if (entryMatch && method === "DELETE") {
-        const id = decodeURIComponent(entryMatch[1]);
-        const alvo = state.entries.find((e) => e.id === id);
-        if (alvo && user.role !== "admin" && alvo.cidade !== minhaCidade) {
-          return sendJSON(res, 403, { erro: "Você só pode excluir registros da sua cidade." });
-        }
-        if (alvo && alvo.unidade === "R$" && user.role !== "admin") {
-          return sendJSON(res, 403, { erro: "Apenas o administrador pode excluir esse serviço (custo mensal fixo)." });
-        }
-        if (alvo) {
-          removerFotoSeForUpload(alvo.fotoAntes);
-          removerFotoSeForUpload(alvo.fotoDepois);
-          removerFotoSeForUpload(alvo.fotoAntesMini);
-          removerFotoSeForUpload(alvo.fotoDepoisMini);
-        }
-        state.entries = state.entries.filter((e) => e.id !== id);
-        persist();
-        return sendJSON(res, 200, { ok: true });
-      }
-
-      // ---- Otimizar fotos antigas (só administrador) ----
-      // Recebe a miniatura (e, se a foto antiga for pesada demais, uma
-      // versão completa já comprimida) gerada no navegador do administrador,
-      // e troca no registro — apagando do disco o arquivo antigo substituído.
-      const otimizarMatch = urlPath.match(/^\/api\/entries\/([^/]+)\/otimizar-fotos$/);
-      if (otimizarMatch && method === "PUT") {
-        if (user.role !== "admin") return sendJSON(res, 403, { erro: "Somente administradores" });
-        const id = decodeURIComponent(otimizarMatch[1]);
-        const alvo = state.entries.find((e) => e.id === id);
-        if (!alvo) return sendJSON(res, 404, { erro: "Registro não encontrado." });
-        const body = await readJSON(req);
-        for (const campo of ["fotoAntes", "fotoDepois"]) {
-          if (!alvo[campo]) continue;
-          const mini = salvarFotoBase64(body[campo + "Mini"]);
-          if (mini) {
-            removerFotoSeForUpload(alvo[campo + "Mini"]);
-            alvo[campo + "Mini"] = mini;
-          }
-          const completa = salvarFotoBase64(body[campo]);
-          if (completa) {
-            removerFotoSeForUpload(alvo[campo]);
-            alvo[campo] = completa;
-          }
-        }
-        persist();
-        return sendJSON(res, 200, alvo);
-      }
-
-      return sendJSON(res, 404, { erro: "Rota não encontrada." });
-    }
-
-    // ------------------------ Arquivos estáticos (app) ------------------------
-    if (method === "GET" || method === "HEAD") {
-      if (serveStatic(req, res, PUBLIC_DIR, urlPath)) return;
-      // qualquer outra rota cai no index.html (app de página única)
-      if (serveStatic(req, res, PUBLIC_DIR, "/index.html")) return;
-    }
-
-    res.writeHead(404);
-    res.end("Não encontrado");
-  } catch (err) {
-    const status = err && err.status ? err.status : 500;
-    console.error(err);
-    sendJSON(res, status, { erro: err.message || "Erro interno" });
-  }
-});
-
-server.listen(PORT, () => {
-  console.log(`Coleta de Campo rodando em http://localhost:${PORT}`);
-});
-
-// Ao desligar o processo (por exemplo, quando o Coolify troca pra uma nova
-// versão), grava o banco uma última vez de forma síncrona antes de sair —
-// como o salvamento normal agora é em segundo plano (persist(), em
-// lib/db.js), sem isso a última alteração feita bem antes do desligamento
-// poderia se perder caso ainda estivesse gravando.
-function encerrarComGravacaoFinal() {
-  try {
-    persistSync();
-  } catch (e) {
-    console.error("Falha ao gravar o banco de dados no desligamento:", e.message);
-  }
-  process.exit(0);
-}
-process.on("SIGTERM", encerrarComGravacaoFinal);
-process.on("SIGINT", encerrarComGravacaoFinal);
+<script src="/app.js"></script>
+</body>
+</html>
