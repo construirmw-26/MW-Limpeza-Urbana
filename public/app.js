@@ -1020,12 +1020,106 @@ function formatPeriodoSemana(inicio, fim){
   const fmt = s => s.split('-').reverse().join('/');
   return fmt(inicio) + ' a ' + fmt(fim);
 }
-function mudarSemana(delta){
+// Período da meta de cada cidade (ver /api/metas/periodo no servidor):
+// semanal (começando num dia da semana), mensal (começando num dia do mês)
+// ou datas específicas. PERIODO_META guarda o da cidade escolhida.
+let PERIODO_META = { tipo: 'semanal', diaSemana: 1 };
+
+function _dataUTC(s){ return new Date(s + 'T00:00:00Z'); }
+function _fmtISO(d){ return d.toISOString().slice(0,10); }
+function _addDias(s, n){ const d = _dataUTC(s); d.setUTCDate(d.getUTCDate() + n); return _fmtISO(d); }
+function _ultimoDiaMes(ano, mes0){ return new Date(Date.UTC(ano, mes0 + 1, 0)).getUTCDate(); }
+// Início do período mensal no mês (ano, mes0) — se o dia escolhido não
+// existe naquele mês (ex: dia 31 em setembro), usa o último dia do mês.
+function _inicioMensal(ano, mes0, dia){
+  while(mes0 < 0){ mes0 += 12; ano--; }
+  while(mes0 > 11){ mes0 -= 12; ano++; }
+  return _fmtISO(new Date(Date.UTC(ano, mes0, Math.min(dia, _ultimoDiaMes(ano, mes0)))));
+}
+
+// Devolve { inicio, fim } do período da meta que contém o dia `dataStr`.
+function periodoDaMeta(cfg, dataStr){
+  cfg = cfg || { tipo:'semanal', diaSemana:1 };
+  if(cfg.tipo === 'datas' && cfg.inicio && cfg.fim) return { inicio: cfg.inicio, fim: cfg.fim };
+  const d = _dataUTC(dataStr);
+  if(cfg.tipo === 'mensal'){
+    const dia = cfg.diaInicio || 1;
+    let ano = d.getUTCFullYear(), mes0 = d.getUTCMonth();
+    let inicio = _inicioMensal(ano, mes0, dia);
+    if(dataStr < inicio){ mes0--; inicio = _inicioMensal(ano, mes0, dia); }
+    const proximo = _inicioMensal(ano, mes0 + 1, dia);
+    return { inicio, fim: _addDias(proximo, -1) };
+  }
+  // semanal
+  const diaSemana = (cfg.diaSemana === undefined || cfg.diaSemana === null) ? 1 : cfg.diaSemana;
+  const volta = (d.getUTCDay() - diaSemana + 7) % 7;
+  const inicio = _addDias(dataStr, -volta);
+  return { inicio, fim: _addDias(inicio, 6) };
+}
+
+function formatPeriodoSemana(inicio, fim){
+  const fmt = s => s.split('-').reverse().join('/');
+  return fmt(inicio) + ' a ' + fmt(fim);
+}
+
+function mudarPeriodoMeta(delta){
   const input = document.getElementById('metas-data');
-  const cur = input.value || hoje();
-  const d = new Date(cur + 'T00:00:00Z');
-  d.setUTCDate(d.getUTCDate() + delta*7);
-  input.value = d.toISOString().slice(0,10);
+  const { inicio, fim } = periodoDaMeta(PERIODO_META, input.value || hoje());
+  input.value = delta < 0 ? _addDias(inicio, -1) : _addDias(fim, 1);
+  renderMetas();
+}
+
+function nomeTipoPeriodo(cfg){
+  if(cfg.tipo === 'mensal') return 'Período mensal (a partir de todo dia ' + (cfg.diaInicio||1) + ')';
+  if(cfg.tipo === 'datas') return 'Período fixo';
+  const dias = ['domingo','segunda','terça','quarta','quinta','sexta','sábado'];
+  return 'Semana (' + dias[cfg.diaSemana ?? 1] + ' a ' + dias[((cfg.diaSemana ?? 1) + 6) % 7] + ')';
+}
+
+function mostrarCamposPeriodoMeta(){
+  const tipo = document.getElementById('mp-tipo').value;
+  document.getElementById('mp-grp-semanal').classList.toggle('hidden', tipo !== 'semanal');
+  document.getElementById('mp-grp-mensal').classList.toggle('hidden', tipo !== 'mensal');
+  document.getElementById('mp-grp-datas').classList.toggle('hidden', tipo !== 'datas');
+}
+
+function preencherConfigPeriodoMeta(){
+  const box = document.getElementById('metas-periodo-config');
+  box.classList.toggle('hidden', !souAdmin());
+  const cfg = PERIODO_META;
+  document.getElementById('mp-tipo').value = cfg.tipo;
+  document.getElementById('mp-dia-semana').value = String(cfg.diaSemana ?? 1);
+  document.getElementById('mp-dia-inicio').value = cfg.diaInicio || '';
+  document.getElementById('mp-inicio').value = cfg.inicio || '';
+  document.getElementById('mp-fim').value = cfg.fim || '';
+  mostrarCamposPeriodoMeta();
+}
+
+async function salvarPeriodoMeta(){
+  const cidade = document.getElementById('metas-cidade').value;
+  if(!cidade) return;
+  const tipo = document.getElementById('mp-tipo').value;
+  const corpo = { cidade, tipo };
+  if(tipo === 'semanal') corpo.diaSemana = parseInt(document.getElementById('mp-dia-semana').value, 10);
+  if(tipo === 'mensal'){
+    const dia = parseInt(document.getElementById('mp-dia-inicio').value, 10);
+    if(!(dia >= 1 && dia <= 31)){ alert('Informe o dia em que o período começa (de 1 a 31).'); return; }
+    corpo.diaInicio = dia;
+  }
+  if(tipo === 'datas'){
+    corpo.inicio = document.getElementById('mp-inicio').value;
+    corpo.fim = document.getElementById('mp-fim').value;
+    if(!corpo.inicio || !corpo.fim){ alert('Informe a data inicial e a data final.'); return; }
+    if(corpo.fim < corpo.inicio){ alert('A data final não pode ser antes da data inicial.'); return; }
+  }
+  try{
+    PERIODO_META = await api('PUT', '/api/metas/periodo', corpo);
+    // Mostra o período que contém hoje (ou o período fixo escolhido)
+    document.getElementById('metas-data').value = tipo === 'datas' ? corpo.inicio : hoje();
+    toast('Período da meta salvo ✓');
+  }catch(e){
+    alert('Não consegui salvar o período. ' + e.message);
+  }
   renderMetas();
 }
 
@@ -1069,17 +1163,32 @@ async function renderMetas(){
   popularSelectMetaCidade();
   const cidadeAtual = document.getElementById('metas-cidade').value;
 
-  const dataInput = document.getElementById('metas-data');
-  if(!dataInput.value) dataInput.value = hoje();
-  const { inicio, fim } = weekRangeFromDate(dataInput.value);
-  document.getElementById('metas-periodo').textContent = 'Semana: ' + formatPeriodoSemana(inicio, fim);
-
   if(!cidadeAtual){
     METAS = {};
+    document.getElementById('metas-periodo-config').classList.add('hidden');
     document.getElementById('metas-lista').innerHTML = '<div class="empty">'+(souAdmin() ? 'Cadastre uma cidade na aba "Cidades" para definir metas.' : 'Você ainda não tem uma cidade atribuída. Fale com o administrador.')+'</div>';
     return;
   }
-  METAS = await api('GET', '/api/metas?cidade=' + encodeURIComponent(cidadeAtual));
+  const [metas, periodo] = await Promise.all([
+    api('GET', '/api/metas?cidade=' + encodeURIComponent(cidadeAtual)),
+    api('GET', '/api/metas/periodo?cidade=' + encodeURIComponent(cidadeAtual)),
+  ]);
+  METAS = metas;
+  // Trocou de cidade (ou o tipo de período mudou)? Volta pro período de hoje.
+  const dataInput = document.getElementById('metas-data');
+  const chavePeriodo = cidadeAtual + '|' + JSON.stringify(periodo);
+  if(renderMetas._chave !== chavePeriodo){
+    dataInput.value = periodo.tipo === 'datas' ? periodo.inicio : hoje();
+    renderMetas._chave = chavePeriodo;
+  }
+  PERIODO_META = periodo;
+  if(!dataInput.value) dataInput.value = hoje();
+  preencherConfigPeriodoMeta();
+  const { inicio, fim } = periodoDaMeta(PERIODO_META, dataInput.value);
+  const fixo = PERIODO_META.tipo === 'datas';
+  document.getElementById('metas-nav').classList.toggle('hidden', fixo);
+  document.getElementById('metas-periodo').textContent = nomeTipoPeriodo(PERIODO_META) + ': ' + formatPeriodoSemana(inicio, fim);
+  const rotuloPeriodo = PERIODO_META.tipo === 'mensal' ? 'mensal' : (fixo ? 'do período' : 'semanal');
 
   const entries = ENTRIES.filter(e => e.data >= inicio && e.data <= fim && e.cidade === cidadeAtual);
 
@@ -1112,10 +1221,10 @@ async function renderMetas(){
         <div class="meta-bar-bg"><div class="meta-bar-fill" style="width:${pct}%;${atingiu?'background:var(--accent)':''}"></div></div>
         <div class="entry-sub">${quantFmt} de ${metaFmt} (${pct.toFixed(0)}%)</div>
       ` : `
-        <div class="entry-sub" style="margin-top:8px;">Feito na semana: ${quantFmt} · nenhuma meta definida</div>
+        <div class="entry-sub" style="margin-top:8px;">Feito no período: ${quantFmt} · nenhuma meta definida</div>
       `}
       ${souAdmin() ? `
-      <label style="margin-top:10px;">Meta semanal (${unidade})</label>
+      <label style="margin-top:10px;">Meta ${rotuloPeriodo} (${unidade})</label>
       <input type="number" min="0" step="${isValorFixo?'0.01':'1'}" value="${metaVal || ''}" placeholder="${isValorFixo?'Ex: 1500':'Ex: 3000'}" onchange="salvarMeta('${servico}', this.value)">
       ` : ''}
     </div>`;
