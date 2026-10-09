@@ -269,19 +269,51 @@
     <!-- METAS -->
     <div class="view" id="view-metas">
       <div class="card">
-        <h2>Meta semanal por serviço</h2>
+        <h2>Metas por serviço</h2>
         <label>Cidade</label>
         <select id="metas-cidade" onchange="renderMetas()"></select>
-        <div class="row2" style="margin-bottom:10px;">
-          <button class="btn btn-outline" style="margin-top:0;" onclick="mudarSemana(-1)">◀ Semana anterior</button>
-          <button class="btn btn-outline" style="margin-top:0;" onclick="mudarSemana(1)">Próxima semana ▶</button>
+
+        <!-- Só o administrador vê/edita: como a meta dessa cidade é contada -->
+        <div id="metas-periodo-config" class="hidden" style="margin-top:12px;padding:12px;border:1px solid var(--border);border-radius:10px;background:#F9FAFB;">
+          <label style="margin-top:0;">Período da meta nesta cidade</label>
+          <select id="mp-tipo" onchange="mostrarCamposPeriodoMeta()">
+            <option value="semanal">Semanal (toda semana)</option>
+            <option value="mensal">Mensal (a partir de um dia)</option>
+            <option value="datas">Datas específicas</option>
+          </select>
+          <div id="mp-grp-semanal">
+            <label>A semana começa na</label>
+            <select id="mp-dia-semana">
+              <option value="1">Segunda-feira</option><option value="2">Terça-feira</option><option value="3">Quarta-feira</option>
+              <option value="4">Quinta-feira</option><option value="5">Sexta-feira</option><option value="6">Sábado</option><option value="0">Domingo</option>
+            </select>
+          </div>
+          <div id="mp-grp-mensal" class="hidden">
+            <label>O período começa todo dia</label>
+            <input type="number" id="mp-dia-inicio" min="1" max="31" step="1" placeholder="Ex: 20">
+            <div class="note">Ex: dia 20 → de 20/09 a 19/10, depois de 20/10 a 19/11, e assim por diante.</div>
+          </div>
+          <div id="mp-grp-datas" class="hidden">
+            <div class="row2">
+              <div><label>Data inicial</label><input type="date" id="mp-inicio"></div>
+              <div><label>Data final</label><input type="date" id="mp-fim"></div>
+            </div>
+          </div>
+          <button class="btn btn-primary" style="margin-top:10px;" onclick="salvarPeriodoMeta()">Salvar período</button>
         </div>
-        <label>Qualquer dia da semana desejada</label>
-        <input type="date" id="metas-data" onchange="renderMetas()">
-        <div class="note" id="metas-periodo" style="margin-top:10px;"></div>
+
+        <div id="metas-nav">
+          <div class="row2" style="margin:12px 0 10px;">
+            <button class="btn btn-outline" style="margin-top:0;" onclick="mudarPeriodoMeta(-1)" id="metas-btn-ant">◀ Período anterior</button>
+            <button class="btn btn-outline" style="margin-top:0;" onclick="mudarPeriodoMeta(1)" id="metas-btn-prox">Próximo período ▶</button>
+          </div>
+          <label>Ou escolha qualquer dia do período desejado</label>
+          <input type="date" id="metas-data" onchange="renderMetas()">
+        </div>
+        <div class="note" id="metas-periodo" style="margin-top:10px;font-weight:600;"></div>
       </div>
       <div id="metas-lista"></div>
-      <div class="note">Defina a meta semanal de cada serviço para a cidade escolhida acima (na unidade cadastrada para ele — m², m, ha ou R$ — pode deixar em branco os que não quer acompanhar). Cada cidade tem suas próprias metas. A barra enche sozinha de acordo com os registros lançados em "+ Registro" dentro da semana e da cidade selecionadas.</div>
+      <div class="note">Defina a meta de cada serviço para a cidade escolhida acima — o valor é o total a cumprir dentro de UM período da cidade (semana, mês do contrato ou as datas escolhidas) (na unidade cadastrada para ele — m², m, ha ou R$ — pode deixar em branco os que não quer acompanhar). Cada cidade tem suas próprias metas. A barra enche sozinha de acordo com os registros lançados em "+ Registro" dentro do período e da cidade selecionados.</div>
     </div>
 
     <!-- CIDADES -->
