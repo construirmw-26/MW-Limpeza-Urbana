@@ -2129,6 +2129,7 @@ function exportarFotos(){
     .imgs figcaption{font-size:11px;font-weight:700;letter-spacing:.5px;margin-top:5px;}
     .obs{font-size:11.5px;color:#6B7280;margin-top:10px;font-style:italic;}
     .assinaturas{display:flex;gap:40px;margin-top:40px;page-break-inside:avoid;}
+    .bloco-final{page-break-inside:avoid;break-inside:avoid;}
     .assinatura{flex:1;text-align:center;}
     .linha{border-top:1px solid #1E2430;margin-bottom:6px;padding-top:6px;}
     .assinatura .cargo{font-size:11px;color:#6B7280;}
@@ -2162,8 +2163,11 @@ function exportarFotos(){
   </div>
   `;
 
-  entries.forEach(e=>{
-    html += `<div class="item">
+  // Cada registro vira um bloco. O ÚLTIMO bloco fica junto com as
+  // assinaturas (ver .bloco-final): se não couberem os dois no fim da
+  // página, o último registro desce junto pra página seguinte — assim a
+  // assinatura nunca fica sozinha numa folha.
+  const blocos = entries.map(e=>`<div class="item">
       <h2>${enderecoCompleto(e)}</h2>
       <div class="local">${e.cidade}</div>
       <div class="meta">
@@ -2181,10 +2185,12 @@ function exportarFotos(){
         </figure>
       </div>
       ${e.obs?`<div class="obs">Observações: ${e.obs}</div>`:''}
-    </div>`;
-  });
+    </div>`);
+  html += blocos.slice(0, -1).join('');
 
   html += `
+  <div class="bloco-final">
+  ${blocos[blocos.length - 1]}
   <div class="assinaturas">
     <div class="assinatura">
       <div class="linha">&nbsp;</div>
@@ -2194,6 +2200,7 @@ function exportarFotos(){
       <div class="linha">&nbsp;</div>
       <div class="cargo">Fiscalização — Prefeitura Municipal</div>
     </div>
+  </div>
   </div>
   <script>
   (function(){
