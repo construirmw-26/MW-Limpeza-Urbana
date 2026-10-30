@@ -420,8 +420,20 @@ document.addEventListener('DOMContentLoaded', ()=>{
     });
   });
 
-  setupPhotoInput('f-antes','preview-antes', (v, mini)=>{ fotoAntesData=v; fotoAntesMini=mini; });
-  setupPhotoInput('f-depois','preview-depois', (v, mini)=>{ fotoDepoisData=v; fotoDepoisMini=mini; });
+  // Cada foto tem dois campos que preenchem a mesma foto: um normal (que
+  // no iPhone/computador mostra o menu "Tirar foto / Fototeca") e um que
+  // abre a câmera direto (-cam). No Android mais novo o campo normal só
+  // abre a galeria, sem câmera — então lá tocar no quadro abre a câmera
+  // direto, e embaixo aparece o link "ou escolher da galeria".
+  if(/Android/i.test(navigator.userAgent)){
+    for(const lado of ['antes','depois']){
+      document.getElementById('f-'+lado).classList.add('foto-file');
+      document.getElementById('f-'+lado+'-cam').classList.remove('foto-file');
+      document.querySelector('label[for="f-'+lado+'"]').classList.remove('hidden');
+    }
+  }
+  for(const id of ['f-antes','f-antes-cam']) setupPhotoInput(id,'preview-antes', (v, mini)=>{ fotoAntesData=v; fotoAntesMini=mini; });
+  for(const id of ['f-depois','f-depois-cam']) setupPhotoInput(id,'preview-depois', (v, mini)=>{ fotoDepoisData=v; fotoDepoisMini=mini; });
 
   checarSessao();
 });
@@ -641,8 +653,7 @@ function resetForm(){
   fotoAntesMini = null; fotoDepoisMini = null;
   document.getElementById('preview-antes').innerHTML = '<span>📷 Antes</span>';
   document.getElementById('preview-depois').innerHTML = '<span>📷 Depois</span>';
-  document.getElementById('f-antes').value = '';
-  document.getElementById('f-depois').value = '';
+  ['f-antes','f-antes-cam','f-depois','f-depois-cam'].forEach(id=>document.getElementById(id).value = '');
   toggleServicoFields();
   popularSelectCidade(); // repõe a cidade (fixa p/ encarregado) e já recarrega as ruas dela
   limparLinhasServico();
@@ -684,8 +695,7 @@ async function editarRegistro(id){
   fotoAntesMini = null; fotoDepoisMini = null;
   document.getElementById('preview-antes').innerHTML = fotoAntesData ? `<img src="${fotoParaExibir(e,'fotoAntes')}">` : '<span>📷 Antes</span>';
   document.getElementById('preview-depois').innerHTML = fotoDepoisData ? `<img src="${fotoParaExibir(e,'fotoDepois')}">` : '<span>📷 Depois</span>';
-  document.getElementById('f-antes').value = '';
-  document.getElementById('f-depois').value = '';
+  ['f-antes','f-antes-cam','f-depois','f-depois-cam'].forEach(id=>document.getElementById(id).value = '');
 
   // Na edição também dá pra usar "+ Outro serviço nesta mesma rua": o
   // registro original é atualizado e cada serviço extra vira um registro
