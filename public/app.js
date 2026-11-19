@@ -667,6 +667,9 @@ function resetForm(){
 async function editarRegistro(id){
   const e = ENTRIES.find(x=>x.id===id);
   if(!e) return;
+  if(document.getElementById('view-lista').classList.contains('active')){
+    posicaoListaAntesDeEditar = { id, scrollY: window.scrollY };
+  }
   editandoId = id;
 
   // Ativa a aba "+ Registro" (sem passar pelo listener genérico das abas).
@@ -706,6 +709,30 @@ async function editarRegistro(id){
   window.scrollTo({top:0, behavior:'smooth'});
 }
 
+// ------------- Voltar pra lista no MESMO lugar depois de editar -------------
+// Ao clicar em Editar, guarda onde a pessoa estava na lista (posição da
+// tela e qual registro). Ao salvar ou cancelar, volta pra aba Registros
+// exatamente nesse ponto, em vez de voltar pro começo da lista.
+let posicaoListaAntesDeEditar = null;
+
+async function voltarParaLista(){
+  document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active', t.dataset.tab === 'lista'));
+  document.querySelectorAll('.view').forEach(v=>v.classList.toggle('active', v.id === 'view-lista'));
+  await renderLista();
+  const pos = posicaoListaAntesDeEditar;
+  posicaoListaAntesDeEditar = null;
+  if(!pos) return;
+  window.scrollTo({ top: pos.scrollY, behavior: 'instant' });
+  // Se o registro mudou de lugar na lista (ex: trocou a data), leva até ele.
+  const card = document.querySelector('[data-entry-id="' + pos.id + '"]');
+  if(card){
+    const r = card.getBoundingClientRect();
+    if(r.top < 0 || r.bottom > window.innerHeight) card.scrollIntoView({ block: 'center', behavior: 'instant' });
+    card.classList.add('entry-destaque');
+    setTimeout(()=>card.classList.remove('entry-destaque'), 1600);
+  }
+}
+
 function entrarNoModoEdicao(){
   document.getElementById('aviso-editando').classList.remove('hidden');
   document.getElementById('btn-salvar').textContent = 'Salvar Alterações';
@@ -721,7 +748,7 @@ function sairDoModoEdicao(){
 
 function cancelarEdicao(){
   resetForm();
-  document.querySelector('.tab[data-tab="lista"]').click();
+  voltarParaLista();
 }
 
 async function salvarRegistro(){
@@ -801,7 +828,7 @@ async function salvarRegistro(){
       toast(linhas.length > 1 ? linhas.length + ' registros salvos ✓' : 'Registro salvo ✓');
     }
     resetForm();
-    if(editando) document.querySelector('.tab[data-tab="lista"]').click();
+    if(editando) await voltarParaLista();
   }catch(e){
     alert('Não consegui salvar. ' + e.message);
   }finally{
@@ -812,9 +839,11 @@ async function salvarRegistro(){
 function excluirRegistro(id){
   confirmarAcao('Excluir este registro?', async ()=>{
     try{
+      const y = window.scrollY;
       await api('DELETE', '/api/entries/' + encodeURIComponent(id));
       toast('Registro excluído ✓');
       await renderLista();
+      window.scrollTo({ top: y, behavior: 'instant' }); // continua no mesmo ponto da lista
     }catch(e){
       alert('Não consegui excluir. ' + e.message);
     }
@@ -949,7 +978,7 @@ async function renderLista(){
     return;
   }
   container.innerHTML = filtered.map(e=>`
-    <div class="entry">
+    <div class="entry" data-entry-id="${e.id}">
       <div class="entry-top">
         <div>
           <div class="entry-title">${enderecoCompleto(e)}</div>
