@@ -876,6 +876,14 @@ function popularFiltros(){
   fCidade.innerHTML = '<option value="">Todas as cidades</option>' + cidadesEntries.map(c=>`<option value="${c}">${c}</option>`).join('');
   if(cidadesEntries.includes(valorCidade)) fCidade.value = valorCidade;
 
+  // Filtro por tipo de serviço: só lista os serviços que já têm registro
+  // lançado (na cidade escolhida, se tiver uma escolhida), em ordem alfabética.
+  const fServico = document.getElementById('filtro-servico');
+  const valorServico = fServico.value;
+  const servicosEntries = [...new Set(ENTRIES.filter(e=>!fCidade.value || e.cidade===fCidade.value).map(e=>e.servico).filter(Boolean))].sort((a,b)=>a.localeCompare(b,'pt-BR'));
+  fServico.innerHTML = '<option value="">Todos os serviços</option>' + servicosEntries.map(sv=>`<option value="${sv}">${sv}</option>`).join('');
+  if(servicosEntries.includes(valorServico)) fServico.value = valorServico;
+
   const expMes = document.getElementById('exp-mes');
   expMes.innerHTML = meses.map(m=>`<option value="${m}">${mesRef(m+'-01')}</option>`).join('') || '<option value="">Sem registros</option>';
 
@@ -941,12 +949,14 @@ async function renderLista(){
   const entries = [...ENTRIES].sort((a,b)=> b.data.localeCompare(a.data) || (b.criadoEm||'').localeCompare(a.criadoEm||''));
   const fMes = document.getElementById('filtro-mes').value;
   const fCidade = document.getElementById('filtro-cidade').value;
+  const fServico = document.getElementById('filtro-servico').value;
 
   document.getElementById('filtro-mes').onchange = renderLista;
   document.getElementById('filtro-cidade').onchange = renderLista;
+  document.getElementById('filtro-servico').onchange = renderLista;
 
   const filtered = entries.filter(e=>
-    (!fMes || mesKey(e.data)===fMes) && (!fCidade || e.cidade===fCidade)
+    (!fMes || mesKey(e.data)===fMes) && (!fCidade || e.cidade===fCidade) && (!fServico || e.servico===fServico)
   );
 
   document.getElementById('st-total').textContent = filtered.length;
@@ -974,7 +984,9 @@ async function renderLista(){
 
   const container = document.getElementById('lista-registros');
   if(filtered.length===0){
-    container.innerHTML = '<div class="empty">Nenhum registro ainda.<br>Vá em "+ Registro" para adicionar o primeiro.</div>';
+    container.innerHTML = (fMes || fCidade || fServico)
+      ? '<div class="empty">Nenhum registro com esse filtro.</div>'
+      : '<div class="empty">Nenhum registro ainda.<br>Vá em "+ Registro" para adicionar o primeiro.</div>';
     return;
   }
   container.innerHTML = filtered.map(e=>`
