@@ -95,7 +95,8 @@
   .entry-actions .edit{color:var(--primary);border-color:#BFE0CD;}
   .edit-banner{display:flex;align-items:center;justify-content:space-between;gap:10px;background:var(--accent-tint);border:1px solid #F3CBA6;color:var(--accent);border-radius:9px;padding:10px 12px;margin-bottom:12px;font-size:13px;font-weight:700;}
   .edit-banner button{background:none;border:1px solid var(--accent);color:var(--accent);border-radius:7px;padding:5px 10px;font-size:12px;font-weight:700;cursor:pointer;}
-  .filters{display:flex;gap:8px;margin-bottom:12px;}
+  .filters{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px;}
+  .filters .filtro-largo{flex-basis:100%;}
   .filters select, .filters input{flex:1;}
   .empty{text-align:center;color:var(--muted);padding:30px 10px;font-size:14px;}
   .note{font-size:12px;color:var(--muted);line-height:1.5;background:#FFF8E1;border:1px solid #F3E3A6;border-radius:9px;padding:10px 12px;margin-top:6px;}
@@ -270,6 +271,7 @@
       <div class="filters">
         <select id="filtro-mes"></select>
         <select id="filtro-cidade"><option value="">Todas as cidades</option></select>
+        <select id="filtro-servico" class="filtro-largo"><option value="">Todos os serviços</option></select>
       </div>
       <div id="lista-registros"></div>
     </div>
